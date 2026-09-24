@@ -188,10 +188,13 @@ export async function fetchLatest(repo, { includePrerelease = false } = {}) {
   };
 }
 
-/** 从远端 manifest.json 读 version；拿不到就返回 null（不抛错，不影响主流程） */
+/** 从远端 manifest.json 读 version；拿不到就返回 null（不抛错、不影响主流程） */
 async function versionFromManifest(repo, ref) {
   try {
-    const bytes = await fetchRemoteFile(repo, ref, 'manifest.json');
+    // manifest.json 很小，且这是「检查更新」的首屏路径 —— 给 raw 一个更短的预算（6s）。
+    // raw 不可达的环境里，多等 20s 换来的还是一次回退，不如早点落到 API。
+    // 有了熔断，即便这 6s 白花，也只在会话内发生一次。
+    const bytes = await fetchRemoteFile(repo, ref, 'manifest.json', { rawTimeoutMs: 6000 });
     const parsed = JSON.parse(new TextDecoder().decode(bytes));
     const v = parsed?.version;
     return typeof v === 'string' && looksLikeVersion(v) ? v : null;
@@ -286,23 +289,47 @@ export async function listRemoteFiles(repo, ref) {
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/**
+ * raw 域名的「熔断」负缓存。
+ *
+ * 在部分网络环境（国内常见）`raw.githubusercontent.com` **整条域名不可达**：
+ * TCP 连接会一直挂住，不会立刻 RST，于是每次调用都要白等到超时才落回 API。
+ * 实测该域名连接挂满 25s，而同一时刻 api.github.com 1.2s 就返回了 ——
+ * 单次检查里白等 20s，足以让「检查更新」直接不可用。
+ *
+ * 所以：raw 一旦被判为「网络层不可用」，在冷却期内直接跳过、只走 API；
+ * 冷却期到后再给 raw 一次机会（网络恢复无需重载扩展）。
+ *
+ * 只对**网络层失败**熔断。HTTP 404 说明 raw 是通的、只是这个文件/ref 不存在，
+ * 属于正常业务结果，绝不能触发熔断。
+ */
+const RAW_COOLDOWN_MS = 10 * 60 * 1000;
+let rawDownUntil = 0;
+
 /** 取远端单个文件内容。
  *  先走 raw.githubusercontent（不占 API 配额）；它被网络策略阻断时退回 API contents
  *  （带 Accept: application/vnd.github.raw，直接返回原始字节，不消耗额外的 base64 解码）。
+ *
+ *  `rawTimeoutMs` 可调：调用方若只是读一个小文件、且对延迟敏感，可以给一个更短的预算，
+ *  避免在 raw 不可达的环境里把首屏拖长。默认仍是 20s。
  */
-export async function fetchRemoteFile(repo, ref, path) {
+export async function fetchRemoteFile(repo, ref, path, { rawTimeoutMs = 20000 } = {}) {
   const full = normalizeRepo(repo);
   if (full === null) throw new UpdateError(`仓库地址无法解析：${repo}`, { kind: 'invalid' });
   const encoded = path.split('/').map(encodeURIComponent).join('/');
 
   const viaRaw = `https://raw.githubusercontent.com/${full}/${encodeURIComponent(ref)}/${encoded}`;
-  try {
-    const res = await fetch(viaRaw, { signal: AbortSignal.timeout(20000), cache: 'no-store', credentials: 'omit' });
-    if (res.ok) return new Uint8Array(await res.arrayBuffer());
-    if (res.status === 404) throw new UpdateError(`${path} 在远端不存在（404）`, { status: 404, kind: 'notfound' });
-  } catch (error) {
-    if (error instanceof UpdateError && error.status === 404) throw error;
-    // 网络层失败（如 raw 域名被墙）：落到 API
+  if (Date.now() >= rawDownUntil) {
+    try {
+      const res = await fetch(viaRaw, { signal: AbortSignal.timeout(rawTimeoutMs), cache: 'no-store', credentials: 'omit' });
+      if (res.ok) return new Uint8Array(await res.arrayBuffer());
+      if (res.status === 404) throw new UpdateError(`${path} 在远端不存在（404）`, { status: 404, kind: 'notfound' });
+      // 其余 HTTP 状态（如 5xx）不上报，继续走 API 兜底
+    } catch (error) {
+      if (error instanceof UpdateError && error.status === 404) throw error;
+      // 网络层失败（域名被墙 / DNS 挂住 / 超时中止）→ 熔断 raw，后续请求直接走 API
+      rawDownUntil = Date.now() + RAW_COOLDOWN_MS;
+    }
   }
 
   const viaApi = `${API}/repos/${full}/contents/${encoded}?ref=${encodeURIComponent(ref)}`;
