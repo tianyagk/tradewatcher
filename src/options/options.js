@@ -378,6 +378,12 @@ async function updateCard() {
           ),
         );
       }
+      if (l.errorKind === 'ratelimit') {
+        // 正常情况下根本走不到这里：版本号是直接下载远端文件读出来的，不花 API 配额。
+        // 所以这个提示的真正含义是「直连下载也不通」，把这一点说清楚，免得用户以为是设计缺陷。
+        status.append(h('div', { class: 'tw-hint', style: { marginTop: '6px' } },
+          '检查更新本身不需要 API 配额：版本号直接取自远端 manifest.json（raw 或归档包）。出现此提示说明直连下载也不通，才回退到 API 且配额已用完 —— 稍后再试，或点「下载更新包」手动比对。'));
+      }
       return;
     }
     const badge = l.comparable
@@ -391,11 +397,11 @@ async function updateCard() {
         h('span', { style: { fontSize: '13px' } }, `当前 v${l.current}`),
         h('span', { class: 'tw-hint' }, '→'),
         // 有可比版本号时优先显示版本；无 tag 的仓库退到 name（「分支 @ 短 SHA」），
-        // 它才是唯一在所有分支（release/tag/commit）都会被赋值的标识字段。
+        // 它才是唯一在所有分支（release/tag/commit/manifest）都会被赋值的标识字段。
         h('span', { style: { fontSize: '13px', fontWeight: '600' } }, l.version ? `v${l.version}` : l.tag || l.name || '未知'),
       ),
       h('div', { class: 'tw-hint', style: { marginTop: '4px' } },
-        `来源：${sourceLabel(l.source)}${l.source === 'commit' && l.name ? `（${l.name}）` : ''} · 检查于 ${fmtTime(l.checkedAt)}`),
+        `来源：${sourceLabel(l.source)}${sourceDetail(l)} · 检查于 ${fmtTime(l.checkedAt)}`),
     );
     if (l.comparable && !l.hasUpdate) {
       status.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' } }, '本机版本不低于远端，无需更新。'));
@@ -414,7 +420,16 @@ async function updateCard() {
     btnApply.disabled = !refOf(l);
   }
 
-  const sourceLabel = (s) => ({ release: 'GitHub Release', tag: 'Git tag', commit: '默认分支最新提交' }[s] ?? s ?? '未知');
+  const sourceLabel = (s) => ({
+    release: 'GitHub Release',
+    tag: 'Git tag',
+    commit: '默认分支最新提交',
+    // 免配额路径：直接读/下载远端文件拿到版本号，不消耗 api.github.com 配额
+    manifest: '远端 manifest.json（免 API 配额）',
+  }[s] ?? s ?? '未知');
+
+  /** 来源补充说明：这两类的 name 才有额外信息（分支 / 短 SHA） */
+  const sourceDetail = (l) => ((l.source === 'commit' || l.source === 'manifest') && l.name ? `（${l.name}）` : '');
 
   /** 就地更新用的 git ref：优先 tag，其次分支 */
   const refOf = (l) => l?.tag ?? l?.ref ?? null;

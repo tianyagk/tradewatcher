@@ -71,6 +71,25 @@ export function normalizeRepo(input) {
 const API = 'https://api.github.com';
 const UA = 'tradewatcher-updater';
 
+/**
+ * 已知的 API 配额冷却截止时间（毫秒时间戳）。
+ *
+ * 为什么要记：一旦撞上配额用尽，**后续每一次请求都注定失败**，再来回试只是白等。
+ * 记下来之后，配额期内所有 API 调用直接短路，改走免配额路径（见 fetchLatest）。
+ * 时间取自响应头 `x-ratelimit-reset`（unix 秒），比"等一小时"精确。
+ */
+let apiBlockedUntil = 0;
+
+/** 当前是否处于「已知配额用尽」状态（据此跳过注定失败的 API 调用） */
+export function apiQuotaExhausted() {
+  return Date.now() < apiBlockedUntil;
+}
+
+/** 仅供测试复位 */
+export function __resetApiQuota() {
+  apiBlockedUntil = 0;
+}
+
 export class UpdateError extends Error {
   constructor(message, { status = 0, kind = 'unknown' } = {}) {
     super(message);
@@ -95,6 +114,9 @@ async function ghJson(path, { timeoutMs = 12000 } = {}) {
   if (res.status === 404) throw new UpdateError('仓库不存在或未公开（404）', { status: 404, kind: 'notfound' });
   if (res.status === 403 || res.status === 429) {
     const remain = res.headers.get('x-ratelimit-remaining');
+    const reset = Number(res.headers.get('x-ratelimit-reset'));
+    // 配额确实用尽时把这个时间点记下来，后续 API 调用直接短路
+    if (remain === '0' && Number.isFinite(reset) && reset > 0) apiBlockedUntil = reset * 1000 + 5000;
     throw new UpdateError(
       remain === '0' ? 'GitHub API 匿名配额已用尽（每小时 60 次），请稍后再试' : 'GitHub 拒绝访问（403/429），可能触发限流',
       { status: res.status, kind: 'ratelimit' },
@@ -118,7 +140,73 @@ export async function fetchLatest(repo, { includePrerelease = false } = {}) {
   const full = normalizeRepo(repo);
   if (full === null) throw new UpdateError(`仓库地址无法解析：${repo}`, { kind: 'invalid' });
 
-  // 1) Releases
+  // ① 免配额主路径：远端 manifest.json（raw → 归档 zip）。
+  //    「有没有新版本」比的就是扩展的版本号，而这个号就写在远端 manifest 里，
+  //    读它不需要任何 API 配额。这条路径拿到结果就直接返回 —— 正常情况下一个
+  //    api.github.com 请求都不会发，配额用尽也照样能检查。
+  const mf = await remoteManifest(full).catch(() => null);
+  if (mf !== null) {
+    return {
+      repo: full,
+      source: 'manifest',
+      tag: null,
+      name: `${mf.branch} 分支`,
+      publishedAt: null,
+      notes: '',
+      htmlUrl: `https://github.com/${full}/tree/${mf.branch}`,
+      zipUrl: `https://github.com/${full}/archive/refs/heads/${mf.branch}.zip`,
+      prerelease: false,
+      ref: mf.branch,
+      version: mf.version,
+    };
+  }
+
+  // ② 免配额路径拿不到版本，才动用需要配额的 API（Releases → Tags）。
+  //    配额已用尽就直接跳过，不发起注定失败的请求。
+  //
+  //    注意这里的取舍：API 是**兜底**而不是「始终执行的增强」。上游用 tag 当发布身份
+  //    时确实信息更全（changelog / 发布时间），但对本扩展而言 manifest 里的版本号
+  //    才是「代码实际处于哪个版本」的权威值，而且免配额 —— 不值得为了 changelog
+  //    每次都烧掉 2/60 的配额。
+  let api = null;
+  if (!apiQuotaExhausted()) {
+    try {
+      api = await tryReleaseOrTag(full, includePrerelease);
+    } catch (error) {
+      if (error.kind === 'notfound' || error.kind === 'invalid') throw error;
+      // 限流/网络问题都不致命，下面还有 commits 这条最后的路
+    }
+  }
+  if (api !== null) {
+    return { ...api, ref: api.ref ?? null, version: looksLikeVersion(api.tag) ? api.tag : null };
+  }
+
+  // ③ 兜底到底：默认分支最新提交（仍要配额）。
+  //    走到这里通常意味着：仓库没有 manifest.json，且 raw/归档都读不到。
+  const info = await ghJson(`/repos/${full}`);
+  const branch = info.default_branch ?? 'main';
+  const commits = await ghJson(`/repos/${full}/commits?per_page=1&sha=${encodeURIComponent(branch)}`);
+  const head = Array.isArray(commits) && commits.length > 0 ? commits[0] : null;
+  return {
+    repo: full,
+    source: 'commit',
+    tag: null,
+    name: `${branch} @ ${head ? String(head.sha).slice(0, 7) : 'HEAD'}`,
+    publishedAt: head?.commit?.author?.date ?? null,
+    notes: head?.commit?.message ?? '',
+    htmlUrl: `https://github.com/${full}/commits/${branch}`,
+    zipUrl: `https://github.com/${full}/archive/refs/heads/${branch}.zip`,
+    prerelease: false,
+    ref: branch,
+    version: null,
+  };
+}
+
+/**
+ * Releases → Tags（**消耗 API 配额**，故调用方应先确认配额可用）。
+ * 两级都拿不到可用的发布信息时返回 null，而不是抛错 —— 让调用方继续走免配额路径。
+ */
+async function tryReleaseOrTag(full, includePrerelease) {
   try {
     const list = await ghJson(`/repos/${full}/releases?per_page=20`);
     if (Array.isArray(list) && list.length > 0) {
@@ -141,10 +229,9 @@ export async function fetchLatest(repo, { includePrerelease = false } = {}) {
     }
   } catch (error) {
     if (error.kind === 'notfound' || error.kind === 'invalid') throw error;
-    // 限流/网络问题：继续尝试 tags（不吃同一条配额路径）
+    // 限流/网络问题：继续尝试 tags
   }
 
-  // 2) Tags
   try {
     const tags = await ghJson(`/repos/${full}/tags?per_page=20`);
     if (Array.isArray(tags) && tags.length > 0) {
@@ -165,42 +252,78 @@ export async function fetchLatest(repo, { includePrerelease = false } = {}) {
     if (error.kind === 'notfound' || error.kind === 'invalid') throw error;
   }
 
-  // 3) 默认分支最新提交（完全没有 tag 的仓库）
-  const info = await ghJson(`/repos/${full}`);
-  const branch = info.default_branch ?? 'main';
-  const commits = await ghJson(`/repos/${full}/commits?per_page=1&sha=${encodeURIComponent(branch)}`);
-  const head = Array.isArray(commits) && commits.length > 0 ? commits[0] : null;
-  return {
-    repo: full,
-    source: 'commit',
-    tag: null,
-    name: `${branch} @ ${head ? String(head.sha).slice(0, 7) : 'HEAD'}`,
-    publishedAt: head?.commit?.author?.date ?? null,
-    notes: head?.commit?.message ?? '',
-    htmlUrl: `https://github.com/${full}/commits/${branch}`,
-    zipUrl: `https://github.com/${full}/archive/refs/heads/${branch}.zip`,
-    prerelease: false,
-    ref: branch,
-    // 没有 tag ≠ 没有版本号：本项目的版本写在 manifest.json 里。
-    // 读一次远端 manifest，就能让「是否已是最新」的判断继续成立 ——
-    // 否则仓库不打 tag 时界面只能一直显示「无法比较版本」，等于没法用。
-    version: await versionFromManifest(full, branch),
-  };
+  return null;
 }
 
-/** 从远端 manifest.json 读 version；拿不到就返回 null（不抛错、不影响主流程） */
-async function versionFromManifest(repo, ref) {
+/** 从 manifest.json 文本里取版本号；不是合法 manifest 就返回 null（不抛错） */
+function versionOfManifestText(text) {
   try {
-    // manifest.json 很小，且这是「检查更新」的首屏路径 —— 给 raw 一个更短的预算（6s）。
-    // raw 不可达的环境里，多等 20s 换来的还是一次回退，不如早点落到 API。
-    // 有了熔断，即便这 6s 白花，也只在会话内发生一次。
-    const bytes = await fetchRemoteFile(repo, ref, 'manifest.json', { rawTimeoutMs: 6000 });
-    const parsed = JSON.parse(new TextDecoder().decode(bytes));
-    const v = parsed?.version;
+    const v = JSON.parse(text)?.version;
     return typeof v === 'string' && looksLikeVersion(v) ? v : null;
   } catch {
     return null;
   }
+}
+
+/** 检查路径上「只为读 manifest 而下载归档」的体积上限：2.8MB 的本项目绰绰有余 */
+const MANIFEST_PROBE_MAX_BYTES = 12 * 1024 * 1024;
+
+/**
+ * **免配额**地拿到远端版本号 —— 这是「检查更新」的主路径。
+ *
+ * 为什么不靠 API：匿名 API 只有 60 次/小时，一撞上限整个检查就废了（用户实际遇到的就是
+ * 「检查失败 · 配额已用尽」）。而扩展的版本号本来就写在远端 manifest.json 里，
+ * 读它根本不需要 API 配额：
+ *
+ *   ① raw.githubusercontent.com 直读（最省，一次请求；该域名被墙时由熔断秒过）
+ *   ② 归档 zip 里读（走 codeload，仍然零配额；用实际更新时同一条链路）
+ *
+ * @returns {Promise<{branch:string, version:string}|null>}
+ */
+async function remoteManifest(full) {
+  const guesses = ['main', 'master'];
+  const tried = new Set();
+
+  /** 阶段一：只走 raw（零配额）。conclusive=true 表示 raw 给出了明确结论。 */
+  const tryRaw = async (branch) => {
+    if (!branch || tried.has(branch)) return { hit: null, conclusive: true };
+    tried.add(branch);
+    try {
+      const bytes = await fetchRemoteFile(full, branch, 'manifest.json', { rawTimeoutMs: 6000, allowApi: false });
+      const v = versionOfManifestText(new TextDecoder().decode(bytes));
+      // 文件拿到了但没有合法 version → 归档里也是同一份，不必再下
+      return { hit: v ? { branch, version: v } : null, conclusive: true };
+    } catch (error) {
+      // raw 明确回 404：这个分支没有 manifest.json → 不是这类项目
+      return { hit: null, conclusive: error?.kind === 'notfound' };
+    }
+  };
+
+  // 先按约定俗成试 main / master：**完全不花配额**。猜错的代价只是一次快速 404。
+  let sawConclusive = false;
+  for (const b of guesses) {
+    const r = await tryRaw(b);
+    if (r.hit) return r.hit;
+    if (r.conclusive) sawConclusive = true;
+  }
+  // raw 是通的、且明确告诉我们「没有 manifest.json」→ 到此为止。
+  // 少了这个判断，对 microsoft/vscode 之类的仓库每次检查都会白拉十几 MB。
+  if (sawConclusive) return null;
+
+  // 阶段二：raw 不可达（域名被墙等），才动用归档这条重路径。**依然零配额** ——
+  // 这里刻意不调 `/repos/{full}` 去问体积或默认分支：那会把这个兜底重新绑回 API 配额，
+  // 而「配额用尽时仍能检查」正是本轮要保证的性质。
+  // 代价是大仓库可能白拉一段，由 downloadRepoZip 的流式上限兜住（超限即中断）。
+  for (const branch of guesses) {
+    try {
+      const map = await downloadRepoZip(full, branch, { maxBytes: MANIFEST_PROBE_MAX_BYTES });
+      const entry = map.get('manifest.json');
+      if (!entry) continue;
+      const v = versionOfManifestText(new TextDecoder().decode(entry));
+      if (v) return { branch, version: v };
+    } catch { /* 换下一个候选分支 */ }
+  }
+  return null;
 }
 
 /**
@@ -212,7 +335,8 @@ export async function checkForUpdate({ repo = DEFAULT_REPO, currentVersion, incl
   const base = { checkedAt: Date.now(), repo: normalizeRepo(repo) ?? String(repo), current };
   try {
     const latest = await fetchLatest(repo, { includePrerelease });
-    // 版本号优先级：tag / Release（即发布身份）→ 远端 manifest.json（无 tag 时的兜底）
+    // fetchLatest 已把版本号收敛好：免配额的 manifest 路径直接给 version；
+    // 只有走 API 兜底时才可能带 tag（tag 优先于 null）。
     const tagVersion = looksLikeVersion(latest.tag) ? latest.tag : null;
     const version = tagVersion ?? latest.version ?? null;
     const hasUpdate = version !== null ? compareVersion(version, current) > 0 : false;
@@ -312,8 +436,11 @@ let rawDownUntil = 0;
  *
  *  `rawTimeoutMs` 可调：调用方若只是读一个小文件、且对延迟敏感，可以给一个更短的预算，
  *  避免在 raw 不可达的环境里把首屏拖长。默认仍是 20s。
+ *
+ *  `allowApi=false` 时**完全不碰 api.github.com**：raw 不通就直接失败，把兜底留给调用方
+ *  自己选（比如改用归档 zip）。用于「配额可能已用尽，不许再消耗配额」的场景。
  */
-export async function fetchRemoteFile(repo, ref, path, { rawTimeoutMs = 20000 } = {}) {
+export async function fetchRemoteFile(repo, ref, path, { rawTimeoutMs = 20000, allowApi = true } = {}) {
   const full = normalizeRepo(repo);
   if (full === null) throw new UpdateError(`仓库地址无法解析：${repo}`, { kind: 'invalid' });
   const encoded = path.split('/').map(encodeURIComponent).join('/');
@@ -330,6 +457,10 @@ export async function fetchRemoteFile(repo, ref, path, { rawTimeoutMs = 20000 } 
       // 网络层失败（域名被墙 / DNS 挂住 / 超时中止）→ 熔断 raw，后续请求直接走 API
       rawDownUntil = Date.now() + RAW_COOLDOWN_MS;
     }
+  }
+
+  if (!allowApi) {
+    throw new UpdateError(`${path}：raw 不可用，且调用方已禁用 API 兜底`, { kind: 'network' });
   }
 
   const viaApi = `${API}/repos/${full}/contents/${encoded}?ref=${encodeURIComponent(ref)}`;
@@ -410,26 +541,75 @@ export async function unzip(bytes) {
 }
 
 /**
- * 下载并解压 GitHub 归档包。
- * @returns {Promise<Map<string, Uint8Array>>} key 为**去掉顶层目录**后的仓库相对路径
+ * 下载归档 zip 的原始字节，带**流式体积上限**。
+ *
+ * 两道保护都是被真机实测逼出来的：
+ *  1. codeload **不返回 Content-Length**（实测响应头里只有 `Content-Type: application/zip`，
+ *     是 chunked 流），所以没法先看大小再决定要不要下 —— 只能边读边累计，超限立刻中断。
+ *     否则调用方一旦指向大仓库（如 microsoft/vscode），就会把几百 MB 拉进内存。
+ *  2. codeload **忽略 Range**（实测 `-r 0-1023` 仍返回 200 并开始发全量），
+ *     所以「只取 zip 尾部中央目录」这种省流量的取巧做法在这里不成立。
  */
-export async function downloadRepoZip(repo, ref, { signal } = {}) {
-  const full = normalizeRepo(repo);
-  if (full === null) throw new UpdateError(`仓库地址无法解析：${repo}`, { kind: 'invalid' });
-  if (!ref) throw new UpdateError('缺少要下载的版本标识（tag / 分支）', { kind: 'invalid' });
-
+async function fetchArchiveBytes(full, ref, { signal, maxBytes = Infinity } = {}) {
   // github.com/.../archive/<ref>.zip 会 302 到 codeload，tag 与分支都能解析
   const url = `https://github.com/${full}/archive/${encodeURIComponent(ref)}.zip`;
   let res;
   try {
-    res = await fetch(url, { signal: signal ?? AbortSignal.timeout(60000), cache: 'no-store', credentials: 'omit' });
+    res = await fetch(url, { signal: signal ?? AbortSignal.timeout(120000), cache: 'no-store', credentials: 'omit' });
   } catch (error) {
     throw new UpdateError(`下载归档包失败：${String(error?.message ?? error)}`, { kind: 'network' });
   }
   if (res.status === 404) throw new UpdateError(`远端没有 ${ref} 这个 tag / 分支（404）`, { status: 404, kind: 'notfound' });
   if (!res.ok) throw new UpdateError(`下载归档包失败：HTTP ${res.status}`, { status: res.status, kind: 'http' });
 
-  const buf = new Uint8Array(await res.arrayBuffer());
+  // 有 Content-Length 时先用它挡一次，省掉无谓的传输
+  const declared = Number(res.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    try { await res.body?.cancel(); } catch { /* 忽略 */ }
+    throw new UpdateError(`归档包 ${declared} 字节，超出上限 ${maxBytes}，已跳过`, { kind: 'toobig' });
+  }
+
+  if (!res.body) return new Uint8Array(await res.arrayBuffer());   // 无流式 body 的降级路径
+
+  const chunks = [];
+  let total = 0;
+  const reader = res.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length;
+      if (total > maxBytes) {
+        throw new UpdateError(`归档包超过上限 ${maxBytes} 字节，已中断下载`, { kind: 'toobig' });
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    try { await reader.cancel(); } catch { /* 忽略 */ }
+    if (error instanceof UpdateError) throw error;
+    throw new UpdateError(`读取归档包失败：${String(error?.message ?? error)}`, { kind: 'network' });
+  }
+
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
+}
+
+/** 「就地更新」时整包的体积上限：够大以容纳正常扩展，又能挡住误配的大仓库 */
+const UPDATE_MAX_BYTES = 128 * 1024 * 1024;
+
+/**
+ * 下载并解压 GitHub 归档包。
+ * @param {{signal?:AbortSignal, maxBytes?:number}} [opts]
+ * @returns {Promise<Map<string, Uint8Array>>} key 为**去掉顶层目录**后的仓库相对路径
+ */
+export async function downloadRepoZip(repo, ref, { signal, maxBytes = UPDATE_MAX_BYTES } = {}) {
+  const full = normalizeRepo(repo);
+  if (full === null) throw new UpdateError(`仓库地址无法解析：${repo}`, { kind: 'invalid' });
+  if (!ref) throw new UpdateError('缺少要下载的版本标识（tag / 分支）', { kind: 'invalid' });
+
+  const buf = await fetchArchiveBytes(full, ref, { signal, maxBytes });
   const entries = await unzip(buf);
 
   // 去掉 GitHub 自动加的 "<仓库名>-<ref>/" 顶层目录
