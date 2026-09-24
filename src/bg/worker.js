@@ -7,6 +7,7 @@
 import * as em from './em.js';
 import * as cal from './calendar.js';
 import * as store from './store.js';
+import * as updater from './updater.js';
 import { marketStatus, pctClass } from '../shared/format.js';
 import { STRIP_ALL_SECIDS, CORE_INDICES, rescueUniverse } from '../shared/model.js';
 
@@ -32,6 +33,8 @@ const handlers = {
     const t = await em.fetchTurnover();
     return t === null ? null : { ...t, progress: timeProgress() };
   },
+  margin: () => em.fetchMargin(),
+  breadthSeries: () => em.fetchBreadthSeries(),
   stripQuotes: () => em.fetchQuotes([...new Set([...STRIP_ALL_SECIDS, ...CORE_INDICES.map((i) => i.secid)])]),
 
   // 自选
@@ -98,6 +101,11 @@ const handlers = {
     version: chrome.runtime.getManifest().version,
     platform: 'Edge / Chromium',
   }),
+
+  // 更新检查（详见 bg/updater.js）
+  'update.check': ({ force } = {}) => checkUpdate({ force: !!force }),
+  'update.state': () => updater.getUpdateState(),
+  'update.storeCheck': () => updater.checkStoreUpdate(),
 };
 
 async function focusCodes() {
@@ -213,15 +221,23 @@ async function evaluateAlerts() {
 }
 
 let notifySeq = 0;
-async function notify(title, message, contextMessage) {
+/**
+ * @param {string} [contextMessage] 通知右上角的小字
+ * @param {{id?:string, durationMs?:number, requireInteraction?:boolean}} [opts]
+ *   传 id 时固定前缀，便于 onClicked 里分流（tw-update-* 打开设置页，其余打开面板）
+ */
+async function notify(title, message, contextMessage, opts = {}) {
   try {
-    await chrome.notifications.create(`tw-${Date.now()}-${notifySeq++}`, {
+    const id = opts.id ? `${opts.id}-${Date.now()}` : `tw-${Date.now()}-${notifySeq++}`;
+    await chrome.notifications.create(id, {
       type: 'basic',
       iconUrl: chrome.runtime.getURL('icons/icon128.png'),
       title,
       message,
       contextMessage: contextMessage ?? 'tradewatcher',
       priority: 2,
+      ...(opts.requireInteraction ? { requireInteraction: true } : {}),
+      ...(opts.durationMs ? { duration: opts.durationMs } : {}),
     });
   } catch (error) {
     console.warn('[tradewatcher] notify failed', String(error));
@@ -351,20 +367,58 @@ function clamp(v, lo = 0, hi = 100) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+/* ─────────────────────────── 更新检查 ───────────────────────────────── */
+
+/** 6 小时内不重复打 GitHub（匿名配额 60 次/小时，但没必要天天点满） */
+const UPDATE_MIN_INTERVAL = 6 * 3600 * 1000;
+
+async function checkUpdate({ force = false } = {}) {
+  const prefs = await store.getPrefs();
+  const repo = prefs.updateRepo || undefined;
+  if (!force) {
+    const prev = await updater.getUpdateState();
+    if (prev && prev.repo === repo && Date.now() - (prev.checkedAt ?? 0) < UPDATE_MIN_INTERVAL) return prev;
+  }
+  return updater.refreshUpdateState({ repo, includePrerelease: !!prefs.includePrerelease });
+}
+
+/** 每日自动检查：只在「首次发现某个新版本」时推送一次通知，避免天天骚扰 */
+async function autoCheckUpdate() {
+  const prefs = await store.getPrefs();
+  if (prefs.autoUpdateCheck === false) return null;
+  const before = await updater.getUpdateState();
+  const state = await updater.refreshUpdateState({ repo: prefs.updateRepo, includePrerelease: !!prefs.includePrerelease });
+  const isNewDiscovery = state.ok && state.hasUpdate && state.version && before?.version !== state.version;
+  if (isNewDiscovery) {
+    await notify(
+      `tradewatcher 有新版本 ${state.version}`,
+      `当前 v${chrome.runtime.getManifest().version} → 最新 v${state.version}。打开「设置 → 关于」可查看更新说明并一键更新。`,
+      'tradewatcher · 更新提醒',
+      { id: 'tw-update', durationMs: 15000 },
+    );
+  }
+  return state;
+}
+
 /* ─────────────────────────── 定时任务 ───────────────────────────────── */
 
 const ALARM_TICK = 'tw:tick';
 const ALARM_CAL = 'tw:calendar';
+const ALARM_UPDATE = 'tw:update';
 
 async function ensureAlarms() {
   await chrome.alarms.create(ALARM_TICK, { periodInMinutes: 1, delayInMinutes: 0.1 });
   await chrome.alarms.create(ALARM_CAL, { periodInMinutes: 360, delayInMinutes: 0.5 });
+  // 每天检查一次更新（首次延迟 3 分钟，避开启动瞬间的请求洪峰）
+  await chrome.alarms.create(ALARM_UPDATE, { periodInMinutes: 1440, delayInMinutes: 3 });
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === ALARM_TICK) {
     await refreshBadge().catch(() => {});
     await evaluateAlerts().catch(() => {});
+    // 涨跌家数日内序列没有免费历史源，只能靠这里按分钟累积（内部自带 3 分钟节流与交易时段判断）
+    await em.sampleBreadthSeries().catch(() => {});
   } else if (alarm.name === ALARM_CAL) {
     try {
       const codes = await focusCodes();
@@ -372,6 +426,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } catch {
       /* 忽略同步失败 */
     }
+  } else if (alarm.name === ALARM_UPDATE) {
+    await autoCheckUpdate().catch(() => {});
   }
 });
 
@@ -413,7 +469,9 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 chrome.notifications.onClicked.addListener((id) => {
-  if (id.startsWith('tw-')) chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/panel.html') });
+  // 更新提醒直接跳到「设置 → 关于」，其余（价格预警）跳到盯盘面板
+  if (id.startsWith('tw-update')) chrome.runtime.openOptionsPage();
+  else if (id.startsWith('tw-')) chrome.tabs.create({ url: chrome.runtime.getURL('src/sidepanel/panel.html') });
 });
 
 // 首次执行（SW 冷启动）也确保闹钟存在

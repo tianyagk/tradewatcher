@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>概览 · 涨跌分布模块 · 视觉验证</title>
+<!--
+  概览涨跌分布模块的独立预览页（开发工具，不随扩展打包）。
+
+  用真实成交额/两融余额快照 + 仿真分时序列，直接在浏览器中验证：
+    · distributionSection 的双栏排版（左：涨跌趋势/成交量/两融走势  右：涨跌幅分布/涨跌家数分时）
+    · 容器查询（@container）：窄侧边栏下自动堆叠为单栏
+    · marginChart / breadthChart / distributionChart 的 SVG 渲染与主题取色
+    · 各处降级态
+
+  用法：node tools/serve.mjs   然后打开 http://127.0.0.1:8080/tools/preview-overview.html
+        ⚠️ 不要用 `python -m http.server`：Windows 上 .js 的 MIME 常被注册成 text/plain，
+           浏览器对 <script type="module"> 执行严格 MIME 检查，会直接拒绝执行 → 页面一片空白。
+-->
+<link rel="stylesheet" href="../src/ui/base.css">
+<link rel="stylesheet" href="../src/sidepanel/panel.css">
+<style>
+  html, body { height: auto; overflow: auto; }
+  body { margin: 0; padding: 18px 16px 40px; background: var(--tw-bg); }
+  .wrap { max-width: 1240px; margin: 0 auto; }
+  .cols { display: grid; grid-template-columns: minmax(320px, 400px) 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--tw-border); border-radius: 10px; background: var(--tw-panel); overflow: hidden; }
+  .card > h2 { margin: 0; padding: 10px 12px; font-size: 12.5px; font-weight: 600;
+               border-bottom: 1px solid var(--tw-border); background: var(--tw-panel-2); color: var(--tw-ink-2); }
+  .card > .bd { padding: 10px 12px 14px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 16px;
+         padding: 10px 12px; border: 1px solid var(--tw-border); border-radius: 10px;
+         background: var(--tw-panel); font-size: 12px; color: var(--tw-ink-2); }
+  .bar label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  .bar button { font: inherit; padding: 4px 11px; border-radius: 6px; cursor: pointer;
+                border: 1px solid var(--tw-border); background: var(--tw-panel-2); color: var(--tw-ink); }
+  .bar button:hover { border-color: var(--tw-accent); color: var(--tw-accent); }
+  .bar code { font-family: var(--tw-mono); font-size: 11px; color: var(--tw-ink-3); }
+  .wide { grid-column: 1 / -1; }
+  .stack > * + * { margin-top: 16px; }
+  .hintline { font-size: 11px; color: var(--tw-ink-3); margin: 6px 0 0; }
+</style>
+</head>
+<body>
+<div id="errbar" style="display:none;margin:0 0 12px;padding:10px 12px;border:1px solid #e03131;
+     border-radius:8px;background:#ffe8e6;color:#a02020;font:12px/1.5 var(--tw-mono);white-space:pre-wrap"></div>
+<script>
+  // 预览页的看门狗：模块加载/运行出错时把错误显示出来，而不是留一片空白
+  (function () {
+    var bar = document.getElementById('errbar');
+    function show(msg) {
+      bar.style.display = 'block';
+      bar.textContent = (bar.textContent ? bar.textContent + '\n' : '') + msg;
+    }
+    window.addEventListener('error', function (e) {
+      show('[error] ' + (e.message || e.type) + (e.filename ? '\n  at ' + e.filename + ':' + e.lineno : ''));
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      show('[unhandledrejection] ' + (e.reason && e.reason.message ? e.reason.message : String(e.reason)));
+    });
+  })();
+</script>
+<div class="wrap">
+  <div class="bar">
+    <strong style="color:var(--tw-ink)">概览 · 涨跌分布模块 · 视觉验证</strong>
+    <label><input type="checkbox" id="redUp" checked> 红涨绿跌（redUp）</label>
+    <button id="btnTheme">切换深/浅主题</button>
+    <button id="btnDegrade">降级态：无分布数据</button>
+    <button id="btnEmpty">空数据</button>
+    <code id="themeTag">theme=light</code>
+  </div>
+
+  <div class="cols">
+    <!-- 侧栏宽度（360px）下的真实观感：容器查询应把两栏堆叠成单栏 -->
+    <div class="card">
+      <h2>侧边栏实宽 360px（容器查询 → 单栏堆叠）</h2>
+      <div class="bd">
+        <div id="narrow360" style="width:336px"></div>
+        <p class="hintline">↑ 侧边栏只有 336px 时的真实观感：左/右栏被 <code>@container (max-width:560px)</code> 折叠成上下两块。</p>
+      </div>
+    </div>
+
+    <div class="stack">
+      <!-- 展开成独立标签页时的宽容器：真双栏 -->
+      <div class="card">
+        <h2>宽容器 900px（真双栏）</h2>
+        <div class="bd"><div id="wide900" style="width:876px"></div></div>
+      </div>
+
+      <!-- 图表单独放大 -->
+      <div class="card">
+        <h2>单图渲染 · marginChart / breadthChart</h2>
+        <div class="bd">
+          <div id="marginOnly"></div>
+          <div id="breadthOnly" style="margin-top:18px"></div>
+          <p class="hintline">两融柱=融资净买额（亿元，正负双色）· 折线=沪深300。涨跌家数分时带昨日虚线对照与折叠后的交易时段刻度。</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 边界与降级 -->
+    <div class="card wide">
+      <h2>边界用例</h2>
+      <div class="bd" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+        <div><p class="hintline">两融：净买额全缺 → 退化用余额区间</p><div id="mgNoFlow"></div></div>
+        <div><p class="hintline">分时：仅 1 点 → 累积中提示</p><div id="bcOne"></div></div>
+        <div><p class="hintline">分时：有昨日无今日 → 只画对照</p><div id="bcPrevOnly"></div></div>
+      </div>
+      <div class="bd" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;border-top:1px solid var(--tw-border)">
+        <div><p class="hintline">分布：极端偏态</p><div id="edgeSkew"></div></div>
+        <div><p class="hintline">分布：全平盘</p><div id="edgeFlat"></div></div>
+        <div><p class="hintline">分布：单档</p><div id="edgeOne"></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { distributionSection } from '../src/sidepanel/views.js';
+import { distributionChart, marginChart, breadthChart } from '../src/ui/charts.js';
+
+/* ── 真实快照：腾讯 day/query 末条累计成交额（2026-09-24 收盘） ─────────── */
+const TURN = {
+  date: '20260924',
+  today: 1653357362390.0898,
+  prev: 1764976416029.21,
+  prevDate: '20260923',
+  change: -111619053639.12012,
+  changePct: -6.324110204839862,
+  progress: 1,
+};
+
+/* ── 仿真全市场分档（5353 只，涨 2588 / 平 121 / 跌 2644） ─────────────── */
+const DIST = {
+  total: 5353, expected: 5353, up: 2588, flat: 121, down: 2644, source: 'eastmoney',
+  bins: [
+    { key: 'u10', label: '≥10%', side: 'up',   count: 62 },
+    { key: 'u7',  label: '7~10', side: 'up',   count: 41 },
+    { key: 'u5',  label: '5~7',  side: 'up',   count: 88 },
+    { key: 'u3',  label: '3~5',  side: 'up',   count: 214 },
+    { key: 'u0',  label: '0~3',  side: 'up',   count: 2183 },
+    { key: 'f0',  label: '平盘', side: 'flat', count: 121 },
+    { key: 'd0',  label: '0~3',  side: 'down', count: 2174 },
+    { key: 'd3',  label: '3~5',  side: 'down', count: 312 },
+    { key: 'd5',  label: '5~7',  side: 'down', count: 96 },
+    { key: 'd7',  label: '7~10', side: 'down', count: 44 },
+    { key: 'd10', label: '≥10%', side: 'down', count: 18 },
+  ],
+};
+
+const BREADTH = { available: true, up: 2588, even: 121, down: 2644 };
+const ZT = { total: 62 };
+const ZB = { total: 24 };
+const DT = { total: 18 };
+
+/* ── 两融：结构取自 RPTA_RZRQ_LSHJ 真实响应（余额 元 / 净买额 元），数值仿真 ── */
+const MARGIN = (() => {
+  const series = [];
+  let bal = 3.0229e12;
+  const start = Date.UTC(2026, 6, 2);
+  let idx = 4812;
+  for (let i = 0; i < 60; i += 1) {
+    // 带一点单向漂移，贴近真实（2026-07→09 余额从 3.02 万亿降到 2.66 万亿）
+    const net = Math.round(Math.sin(i / 3.1) * 2.6e9 + Math.sin(i / 9) * 1.1e9 - 6.4e9);
+    bal += net;
+    idx += Math.sin(i / 5) * 22 + (i % 7 === 0 ? -9 : 4);
+    const d = new Date(start + i * 86400000);
+    // 跳过周末，逼近真实交易日序列
+    if (d.getUTCDay() === 0) continue;
+    if (d.getUTCDay() === 6) continue;
+    series.push({ date: d.toISOString().slice(0, 10), balance: bal, netBuy: net, finance: bal * 0.98, short: bal * 0.02, index: idx });
+  }
+  const first = series[0];
+  const last = series[series.length - 1];
+  return {
+    series,
+    latest: last,
+    firstDate: first.date,
+    lastDate: last.date,
+    balanceChange: last.balance - first.balance,
+    indexChangePct: ((last.index - first.index) / first.index) * 100,
+    indexName: '沪深300',
+    source: 'eastmoney',
+  };
+})();
+
+/* ── 涨跌家数分时：仿真交易日采样点（3 分钟一点，午休已折叠） ───────────── */
+const BSERIES = (() => {
+  const mk = (n, upBias, seed) => {
+    const out = [];
+    for (let i = 0; i < n; i += 1) {
+      const q = i / (n - 1);
+      const wob = Math.sin(i * 0.9 + seed) * 90 + Math.sin(i * 0.23 + seed) * 210;
+      out.push({ t: 0, p: Number(q.toFixed(4)), up: Math.round(1750 + upBias * q * 900 + wob), down: Math.round(3050 - upBias * q * 900 - wob * 0.9), flat: 110, source: 'market' });
+    }
+    return out;
+  };
+  return { date: '2026-09-24', points: mk(78, 1, 0.4), prevDate: '2026-09-23', prevPoints: mk(80, -0.55, 2.1), days: 5, sampling: false };
+})();
+
+const ctxOf = (redUp) => ({ redUp, state: { quotes: {}, prefs: {} } });
+
+const el = (id) => document.getElementById(id);
+const paint = (id, node) => {
+  const box = el(id);
+  box.textContent = '';
+  if (node) box.append(node);
+};
+
+function renderAll() {
+  const redUp = el('redUp').checked;
+  const ctx = ctxOf(redUp);
+  const full = { breadth: BREADTH, zt: ZT, zb: ZB, dt: DT, dist: DIST, turn: TURN, margin: MARGIN, bseries: BSERIES };
+
+  paint('narrow360', distributionSection(ctx, full));
+  paint('wide900', distributionSection(ctx, full));
+
+  paint('marginOnly', null);
+  marginChart(el('marginOnly'), { series: MARGIN.series, indexName: MARGIN.indexName, redUp, height: 158 });
+
+  paint('breadthOnly', null);
+  breadthChart(el('breadthOnly'), { points: BSERIES.points, prevPoints: BSERIES.prevPoints, prevDate: BSERIES.prevDate, height: 158 });
+
+  // 边界：两融净买额全缺
+  paint('mgNoFlow', null);
+  marginChart(el('mgNoFlow'), { series: MARGIN.series.map((r) => ({ ...r, netBuy: null })), redUp, height: 140 });
+
+  // 边界：分时仅 1 点
+  paint('bcOne', null);
+  breadthChart(el('bcOne'), { points: BSERIES.points.slice(0, 1), height: 140 });
+
+  // 边界：只有昨日
+  paint('bcPrevOnly', null);
+  breadthChart(el('bcPrevOnly'), { points: [], prevPoints: BSERIES.prevPoints, prevDate: BSERIES.prevDate, height: 140 });
+
+  const e1 = document.createElement('div');
+  distributionChart(e1, { bins: [
+    { label: '≥10%', side: 'up', count: 3 }, { label: '7~10', side: 'up', count: 0 },
+    { label: '5~7', side: 'up', count: 6 }, { label: '3~5', side: 'up', count: 12 },
+    { label: '0~3', side: 'up', count: 4902 }, { label: '平盘', side: 'flat', count: 2 },
+    { label: '0~3', side: 'down', count: 9 }, { label: '3~5', side: 'down', count: 0 },
+    { label: '5~7', side: 'down', count: 0 }, { label: '7~10', side: 'down', count: 0 },
+    { label: '≥10%', side: 'down', count: 0 },
+  ], redUp, height: 140 });
+  paint('edgeSkew', e1);
+
+  const e2 = document.createElement('div');
+  distributionChart(e2, { bins: DIST.bins.map((b) => (b.side === 'flat' ? { ...b, count: 42 } : { ...b, count: 0 })), redUp, height: 140 });
+  paint('edgeFlat', e2);
+
+  const e3 = document.createElement('div');
+  distributionChart(e3, { bins: [{ label: '0~3', side: 'up', count: 7 }], redUp, height: 140 });
+  paint('edgeOne', e3);
+}
+
+/* ── 交互 ─────────────────────────────────────────────────────────────── */
+el('redUp').addEventListener('change', renderAll);
+
+el('btnTheme').addEventListener('click', () => {
+  const root = document.documentElement;
+  const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  root.dataset.theme = next;
+  el('themeTag').textContent = `theme=${next}`;
+  renderAll();
+});
+
+let degraded = false;
+el('btnDegrade').addEventListener('click', () => {
+  degraded = !degraded;
+  el('btnDegrade').textContent = degraded ? '恢复：带分布数据' : '降级态：无分布数据';
+  const full = { breadth: BREADTH, zt: ZT, zb: ZB, dt: DT, dist: degraded ? null : DIST, turn: TURN, margin: degraded ? null : MARGIN, bseries: degraded ? null : BSERIES };
+  paint('narrow360', distributionSection(ctxOf(el('redUp').checked), full));
+});
+
+el('btnEmpty').addEventListener('click', () => {
+  paint('narrow360', distributionSection(ctxOf(el('redUp').checked), {}));
+});
+
+renderAll();
+</script>
+</body>
+</html>

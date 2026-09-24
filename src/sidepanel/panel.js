@@ -4,23 +4,42 @@
  */
 import { h, mount, qs, toast, applyPrefs, watchSystemTheme } from '../ui/dom.js';
 import * as api from '../ui/api.js';
-import { openDrawer, closeDrawer, DRAWER_CSS } from '../ui/drawer.js';
-import { sparkline, trendChart, palette } from '../ui/charts.js';
+import * as cache from '../ui/cache.js';
+import { openDrawer, DRAWER_CSS } from '../ui/drawer.js';
+import { trendChart } from '../ui/charts.js';
 import { STRIP_ROWS, CORE_INDICES } from '../shared/model.js';
-import { fmtAmt, fmtChg, fmtPct, fmtPrice, fmtVol, marketStatus, pctClass } from '../shared/format.js';
-import { VIEWS } from './views.js';
+import { fmtAmt, fmtPct, fmtPrice, marketStatus, pctClass } from '../shared/format.js';
+import { VIEWS, pickSymbol, liveItems } from './views.js';
 
 const TABS = [
   { key: 'overview', label: '概览' },
   { key: 'watch', label: '自选' },
   { key: 'pos', label: '持仓' },
-  { key: 'market', label: '大盘' },
   { key: 'boards', label: '板块' },
   { key: 'money', label: '资金' },
   { key: 'limit', label: '涨停' },
   { key: 'calendar', label: '日历' },
   { key: 'alerts', label: '预警' },
 ];
+
+/**
+ * 缓存键 → 关心它的页签。
+ * 只用于「后台刷新完成后要不要重绘当前页」，映射外的键（如 trend / kline / detail）
+ * 刻意不触发重绘 —— 否则悬浮卡加载分时都会把正文重建一遍。
+ */
+const KEY_TABS = {
+  breadth: ['overview', 'money'],
+  distribution: ['overview'],
+  turnover: ['overview', 'money'],
+  margin: ['overview'],
+  breadthSeries: ['overview'],
+  boards: ['overview', 'boards', 'money'],
+  hsgt: ['money'],
+  flow: ['money'],
+  stockflow: ['money'],
+  limit: ['overview', 'limit'],
+  meta: ['calendar'],
+};
 
 const state = {
   prefs: null,
@@ -40,6 +59,11 @@ const state = {
 };
 
 let modalMask = null;
+/** 页签渲染进行中：此时忽略缓存回调触发的重绘，避免自激 */
+let rendering = false;
+/** 有一次「后台刷新完成，需要重绘」待处理 */
+let pendingSoft = false;
+let softTimer = null;
 
 /* ── 行情节点绑定（局部刷新，避免整表重建闪烁） ───────────────────────── */
 
@@ -222,6 +246,7 @@ async function switchTab(key) {
   state.tab = key;
   state.prefs.panelTab = key;
   api.prefs.set({ panelTab: key }).catch(() => {});
+  pendingSoft = false;
   renderTabs();
   await renderTab();
 }
@@ -230,11 +255,42 @@ async function renderTab() {
   state.qnodes = [];
   const view = VIEWS[state.tab];
   if (!view) return;
+  rendering = true;
   try {
     await view(ctx);
   } catch (error) {
     mount(ctx.body, h('div', { class: 'tw-empty', text: `页面加载失败：${error.message}` }));
+  } finally {
+    rendering = false;
   }
+}
+
+/**
+ * 缓存里的数据被后台刷新后，当前页签需要重绘一次 —— 否则用户看到的是「旧值」。
+ * 做 400ms 防抖：一次页签渲染会并行触发多个接口，没必要逐个重绘。
+ * 页面不可见时挂起，等重新可见再补画（后台标签页重绘纯属浪费）。
+ */
+function scheduleSoftRender() {
+  pendingSoft = true;
+  clearTimeout(softTimer);
+  softTimer = setTimeout(runSoftRender, 400);
+}
+
+function runSoftRender() {
+  softTimer = null;
+  if (document.hidden) return;              // 保留 pendingSoft，可见时再补
+  if (rendering) {
+    softTimer = setTimeout(runSoftRender, 300);
+    return;
+  }
+  if (!pendingSoft) return;
+  pendingSoft = false;
+  renderTab();
+}
+
+function tabOfKey(key) {
+  const base = String(key).split(':')[0];
+  return KEY_TABS[base] ?? null;
 }
 
 /* ── 刷新 ─────────────────────────────────────────────────────────────── */
@@ -242,8 +298,7 @@ async function renderTab() {
 function neededSecids() {
   const ids = new Set([...CORE_INDICES.map((i) => i.secid)]);
   for (const row of STRIP_ROWS) for (const it of row.items) ids.add(it.secid);
-  const live = (state.watch?.items ?? []).filter((i) => !(state.watch?.groups ?? []).some((g) => g.id === i.groupId && g.archived));
-  for (const i of live) ids.add(i.secid);
+  for (const i of liveItems(state.watch)) ids.add(i.secid);
   for (const p of state.portfolio?.view?.positions ?? []) ids.add(p.secid);
   return [...ids];
 }
@@ -256,6 +311,8 @@ async function refreshQuotes() {
     patchQuotes();
     const got = ids.filter((id) => q[id] && q[id].price !== null && q[id].price !== undefined).length;
     state.stale = got === 0 && ids.length > 0;
+    // 只在真拿到行情时才更新快照：限流时别把上一份好数据覆盖成空
+    if (got > 0) cache.put('quotes', state.quotes);
     return true;
   } catch (error) {
     state.stale = true;
@@ -291,8 +348,8 @@ function schedule() {
     state.busy = true;
     try {
       await refreshQuotes();
-      // 概览/大盘/资金等含衍生数据的页面按 60s 重算
-      if ((state.tab === 'overview' || state.tab === 'market') && state.tick % Math.max(2, Math.round(60 / sec)) === 0) await renderTab();
+      // 概览含各类衍生统计，按 60s 重算一次（缓存 TTL 各自把握）
+      if (state.tab === 'overview' && state.tick % Math.max(2, Math.round(60 / sec)) === 0) await renderTab();
       if (state.stale) ctx.setStatus('行情源暂不可用（可能被限流），已展示缓存值并自动重试…');
       else ctx.setStatus(`更新于 ${new Date().toLocaleTimeString('zh-CN')} · 延迟行情（非 L2）`);
     } finally {
@@ -322,16 +379,30 @@ function injectDrawerCss() {
 
 async function init() {
   injectDrawerCss();
+
+  // ① 先把上一次会话的快照铺进内存缓存：首屏、页签切换都不必等网络
+  await cache.hydrate();
+
   state.prefs = await api.prefs.get();
   applyPrefs(state.prefs);
   state.tab = state.prefs.panelTab && TABS.some((t) => t.key === state.prefs.panelTab) ? state.prefs.panelTab : 'overview';
   ctx.body = qs('#body');
 
+  const snap = cache.peek('quotes');
+  if (snap && typeof snap === 'object') Object.assign(state.quotes, snap);
+
   qs('#btn-refresh').onclick = async () => {
     state.tick = 0;
+    pendingSoft = false;
+    // 不清缓存的话，「刷新」只会把缓存里的旧值再画一遍，用户会以为按钮失灵
+    api.invalidateDerived();
     await refreshQuotes();
     await renderTab();
     toast('已刷新');
+  };
+  qs('#btn-search').onclick = async () => {
+    const p = await pickSymbol(ctx, '搜索标的');
+    if (p) ctx.openDrawer(p.secid);
   };
   qs('#btn-mask').onclick = async () => {
     state.prefs = await api.prefs.set({ maskMode: !state.prefs.maskMode });
@@ -357,9 +428,19 @@ async function init() {
     }
   });
 
+  // 后台刷新回来的新数据：只重绘「当前页签关心的键」
+  cache.onAnyUpdate((_value, key) => {
+    const tabs = tabOfKey(key);
+    if (tabs && tabs.includes(state.tab)) scheduleSoftRender();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && pendingSoft) scheduleSoftRender();
+  });
+
   renderTabs();
   renderStrips();
   tickClock();
+  patchQuotes();   // 用缓存快照先把行情条填上（没有则维持占位）
 
   await Promise.all([
     api.watch.get().then((w) => { state.watch = w; }).catch(() => {}),

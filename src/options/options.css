@@ -187,3 +187,78 @@ body {
   padding: 0 5px;
   font-size: 11.5px;
 }
+
+/* ── 版本与更新 ───────────────────────────────────────────────────────── */
+
+.op-upd-status {
+  border: 1px solid var(--tw-border);
+  background: var(--tw-panel-2);
+  border-radius: var(--tw-radius-sm);
+  padding: 9px 11px;
+  font-size: 12.5px;
+}
+
+.op-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.7;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--tw-panel-3);
+  color: var(--tw-ink-2);
+  border: 1px solid var(--tw-border);
+}
+.op-badge.up { background: var(--tw-up-bg); color: var(--tw-up-ink); border-color: var(--tw-up-ink); }
+.op-badge.ok { background: var(--tw-down-bg); color: var(--tw-down-ink); border-color: var(--tw-down-ink); }
+.op-badge.warn { background: var(--tw-panel-3); color: var(--tw-warn-ink); border-color: var(--tw-warn-ink); }
+
+/* 更新说明区域限高，长 changelog 不会把页面撑爆 */
+.op-upd-status .op-pre { max-height: 220px; overflow: auto; }
+
+/* changelog 用正文字体，等宽的 .op-pre 只留给进度日志 */
+.op-pre.op-notes {
+  font-family: var(--tw-sans);
+  font-size: 12px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+.op-pre.op-notes code {
+  font-family: var(--tw-mono);
+  font-size: 11px;
+  background: var(--tw-panel);
+  border: 1px solid var(--tw-border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.op-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.op-sep {
+  height: 1px;
+  background: var(--tw-border);
+  margin: 14px 0 11px;
+}
+
+/* 进度条 */
+.op-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--tw-panel-3);
+  overflow: hidden;
+  margin-top: 10px;
+}
+.op-bar > i {
+  display: block;
+  height: 100%;
+  background: var(--tw-accent);
+  transition: width 0.2s ease;
+}
+
+.op-card .op-bar + .op-pre { margin-top: 8px; }
+
+/* 仓库地址输入框：跟随 .op-row 的 ctl 宽度约束 */
+.op-row .ctl .tw-input {
+  width: 100%;
+  min-width: 220px;
+}

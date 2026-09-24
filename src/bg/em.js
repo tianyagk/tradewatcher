@@ -9,8 +9,8 @@
  *     避免价格在「数字 / —」之间闪烁。
  *  3. K 线历史缓存落在 chrome.storage.local，首次拉全量、之后增量合并。
  */
-import { num } from '../shared/format.js';
-import { SECID_RE } from '../shared/model.js';
+import { num, sessionPos, inSamplingWindow } from '../shared/format.js';
+import { SECID_RE, KEYS } from '../shared/model.js';
 import { sget, sset, get, set } from './storage.js';
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
@@ -1641,3 +1641,189 @@ export async function fetchTurnover() {
     };
   });
 }
+
+/* ───────────────────────── 两融（融资融券）走势 ───────────────────────── */
+
+/** 腾讯日 K 收盘序列 → Map<'YYYY-MM-DD', close> */
+async function tencentDailyCloses(secid, count = 120) {
+  const sym = tencentSymbol(secid);
+  if (sym === null) return null;
+  const json = await fetchFromHost('web.ifzq.gtimg.cn', `/appstock/app/fqkline/get?param=${sym},day,,,${count},qfq`, 9000);
+  const node = json?.data?.[sym];
+  const arr = node?.qfqday ?? node?.day;
+  if (!Array.isArray(arr)) return null;
+  const out = new Map();
+  for (const row of arr) {
+    const date = String(row?.[0] ?? '');
+    const close = num(row?.[2]);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date) && close !== null) out.set(date, close);
+  }
+  return out.size > 0 ? out : null;
+}
+
+/**
+ * 两融走势：近 N 个交易日的 两融余额 / 融资净买 / 参照指数。
+ * 源：datacenter-web `RPTA_RZRQ_LSHJ`（沪深两市融资融券历史合计）。
+ *
+ * 该主机通常**不受 push2 限流影响**（实测 push2* 全挂时仍正常），因此是独立链路。
+ *
+ * ⚠️ 报表里的 `NEW` 字段不是上证指数 —— 实测 2026-09-23 `NEW`=4517.28 而上证收 3936.52，
+ * 口径不明，故**不用它**，指数序列另从腾讯日 K 取沪深300（与「沪深两市」口径最匹配）。
+ */
+export async function fetchMargin(days = 90) {
+  const n = Math.min(250, Math.max(20, Math.round(days)));
+  return ttlCache(`margin:${n}`, 1800000, async () => {
+    const q = new URLSearchParams({
+      reportName: 'RPTA_RZRQ_LSHJ',
+      columns: 'DIM_DATE,RZRQYE,RZJME,RZYE,RQYE',
+      sortColumns: 'DIM_DATE',
+      sortTypes: '-1',
+      pageSize: String(n),
+      pageNumber: '1',
+      source: 'WEB',
+      client: 'WEB',
+    });
+    let json = null;
+    try {
+      json = await fetchFromHost(DC_HOST, `/api/data/v1/get?${q}`, 12000);
+    } catch {
+      return null;
+    }
+    const rows = json?.result?.data;
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+
+    const byDate = new Map();
+    for (const r of rows) {
+      const date = String(r.DIM_DATE ?? '').slice(0, 10);
+      const balance = num(r.RZRQYE);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || balance === null) continue;
+      byDate.set(date, { date, balance, netBuy: num(r.RZJME), finance: num(r.RZYE), short: num(r.RQYE) });
+    }
+    if (byDate.size < 2) return null;
+
+    const indexCloses = await tencentDailyCloses('1.000300', n + 20).catch(() => null);
+    const series = [...byDate.values()]
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .map((r) => ({ ...r, index: indexCloses?.get(r.date) ?? null }));
+
+    const first = series[0];
+    const last = series[series.length - 1];
+    return {
+      series,
+      latest: last,
+      firstDate: first.date,
+      lastDate: last.date,
+      balanceChange: last.balance - first.balance,
+      indexChangePct: first.index && last.index ? ((last.index - first.index) / first.index) * 100 : null,
+      indexName: '沪深300',
+      source: 'eastmoney',
+    };
+  });
+}
+
+/* ─────────────────── 涨跌家数分时（本地采样累积） ────────────────────── */
+
+/**
+ * 涨跌家数的**日内**序列没有任何免费历史端点 —— 上游只能给「当前值」。
+ * 因此改为「边盯盘边累积」：service worker 借 1 分钟的 alarm 采样并落盘，
+ * 多个面板共用同一份数据，且跨浏览器重启保留（按交易日分桶，保留最近 N 天）。
+ *
+ * 代价必须讲清：当天首次打开时曲线是从当前时刻开始长出来的，需要挂着才逐渐完整。
+ *
+ * 采样成本控制（很关键，别把免费接口点爆）：
+ *  - 优先廉价路径 `fetchBreadth()`（2 次指数行情，指望 f104/f105/f106）
+ *  - 只有它拿不到家数时才退回 `fetchDistribution()`（全市场 14 页）
+ *  - 且昂贵路径**限制为每 3 分钟最多一次**，与其内部 180s TTL 对齐
+ *  - 点位间隔 3 分钟：240 分钟交易日 → 约 80 个点，足够看形状
+ */
+
+const BSERIES_KEEP = 5;
+const SAMPLE_MIN_GAP = 170000;      // 两个采样点至少间隔 ~3 分钟
+const DIST_MIN_GAP = 170000;        // 昂贵路径的最小间隔
+let lastDistSampleAt = 0;
+
+/**
+ * 昂贵路径的退避。
+ * push2 主机被限流/不可达时，廉价款与昂贵款会**一起失败**；
+ * 若每 3 分钟都去轰 14 页全市场快照，纯属浪费（实测某环境 push2 整段返回连接重置）。
+ * 连续失败 3 次 → 停 30 分钟再试，成功即清零。
+ */
+let distFails = 0;
+let distSkipUntil = 0;
+
+export async function sampleBreadthSeries(now = Date.now()) {
+  if (!inSamplingWindow(now)) return null;
+
+  const store = (await get(KEYS.breadthSeries, null)) ?? {};
+  const today = ymd(now);
+  const points = Array.isArray(store[today]) ? store[today] : [];
+  const last = points[points.length - 1];
+  if (last !== undefined && now - last.t < SAMPLE_MIN_GAP) return points;
+
+  let up = null;
+  let down = null;
+  let flat = null;
+  let source = null;
+
+  const b = await fetchBreadth().catch(() => null);
+  if (b?.available && b.up !== null && b.down !== null) {
+    up = b.up;
+    down = b.down;
+    flat = b.even;
+    source = 'index';
+  } else if (now >= distSkipUntil && now - lastDistSampleAt >= DIST_MIN_GAP) {
+    lastDistSampleAt = now;
+    const dist = await fetchDistribution().catch(() => null);
+    if (dist !== null) {
+      up = dist.up;
+      down = dist.down;
+      flat = dist.flat;
+      source = 'market';
+      distFails = 0;
+      distSkipUntil = 0;
+    } else {
+      distFails += 1;
+      if (distFails >= 3) {
+        distFails = 0;
+        distSkipUntil = now + 30 * 60000;
+      }
+    }
+  }
+
+  if (up === null || down === null) return points;
+
+  points.push({ t: now, p: Number(sessionPos(now).toFixed(5)), up, down, flat: flat ?? 0, source });
+  if (points.length > 400) points.splice(0, points.length - 400);
+
+  store[today] = points;
+  const dates = Object.keys(store).sort();
+  for (const k of dates.slice(0, Math.max(0, dates.length - BSERIES_KEEP))) delete store[k];
+  await set(KEYS.breadthSeries, store);
+  return points;
+}
+
+/** 读取累积的涨跌家数分时（含上一交易日，供虚线对照） */
+export async function fetchBreadthSeries(now = Date.now()) {
+  const store = (await get(KEYS.breadthSeries, null)) ?? {};
+  const today = ymd(now);
+  const dates = Object.keys(store).sort();
+  const prev = dates.filter((d) => d < today).pop() ?? null;
+  const points = Array.isArray(store[today]) ? store[today] : [];
+  return {
+    // 存储键用紧凑的 YYYYMMDD，但对外给**可读**的 YYYY-MM-DD（界面直接拿去当标签用）
+    date: dashDate(today),
+    prevDate: prev ? dashDate(prev) : null,
+    points,
+    prevPoints: prev ? store[prev] ?? [] : [],
+    days: dates.length,
+    // 采样中但还画不出曲线时，前端要提示「累积中」而不是「无数据」
+    sampling: points.length < 2,
+  };
+}
+
+/** YYYYMMDD → YYYY-MM-DD（已是连字符格式则原样返回） */
+function dashDate(s) {
+  const t = String(s ?? '');
+  return /^\d{8}$/.test(t) ? `${t.slice(0, 4)}-${t.slice(4, 6)}-${t.slice(6, 8)}` : t;
+}
+

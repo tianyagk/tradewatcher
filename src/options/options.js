@@ -1,6 +1,7 @@
 /** 设置页：外观与刷新 / 预警管理 / 数据 / 关于。 */
 import { h, mount, qs, toast, applyPrefs, watchSystemTheme, promptModal, confirmModal } from '../ui/dom.js';
 import * as api from '../ui/api.js';
+import * as updater from '../bg/updater.js';
 import { ALERT_FIELD_LABEL, CORE_INDICES, STRIP_ROWS } from '../shared/model.js';
 import { fmtDateTime, fmtPct, pctClass } from '../shared/format.js';
 
@@ -34,6 +35,25 @@ async function patch(p) {
   state.prefs = await api.prefs.set(p);
   applyPrefs(state.prefs);
   render();
+}
+
+/** 保存偏好但**不重渲染**。用于「关于」页的输入框/开关：整页重绘会打断输入与更新进度。 */
+async function patchQuiet(p) {
+  state.prefs = await api.prefs.set(p);
+  applyPrefs(state.prefs);
+}
+
+/** 自带状态的小开关（patchQuiet 场景下不能依赖重渲染更新外观） */
+function toggleCtl(value, onChange) {
+  const el = h('div', {
+    class: `tw-switch ${value ? 'on' : ''}`,
+    onclick: async () => {
+      const next = !el.classList.contains('on');
+      el.classList.toggle('on', next);
+      await onChange(next);
+    },
+  });
+  return el;
 }
 
 /* ── 外观 ─────────────────────────────────────────────────────────────── */
@@ -262,51 +282,321 @@ async function copyJson() {
 
 /* ── 关于 ─────────────────────────────────────────────────────────────── */
 
-function renderAbout() {
+async function renderAbout() {
   const m = chrome.runtime.getManifest();
-  return h('div', {},
+  const box = h('div', {});
+
+  box.append(
     h('div', { class: 'op-card' },
       h('h3', { text: `tradewatcher v${m.version}` }),
       h('div', { style: { fontSize: '13px', lineHeight: '1.85' } },
         '综合盯盘 Edge/Chromium 浏览器扩展。整合了 DeepSeek Harness 插件 dsh-tradewatcher 的数据模型与核算方式，以及「爱盯盘」的界面组织思路，并在此基础上扩展了板块资金流、涨跌停复盘、市场宽度、多源兜底与价格预警等能力。',
       ),
     ),
-    h('div', { class: 'op-card' },
-      h('h3', { text: '数据源（均为免费公开接口，延迟行情）' }),
-      h('table', { class: 'op-tbl' },
-        h('thead', {}, h('tr', {}, h('th', { text: '用途' }), h('th', { text: '来源' }))),
-        h('tbody', {},
-          tr('批量行情 / 板块榜 / 资金流', '东方财富 push2 / push2delay'),
-          tr('分时序列', '东方财富 trends2（多主机回退）'),
-          tr('多日分时（五日）', '新浪 5 分钟 K 线（腾讯兜底）'),
-          tr('历史 K 线', '腾讯 fqkline（东财 push2his 兜底，本地缓存 + 增量更新）'),
-          tr('标的搜索', '东方财富 searchapi suggest'),
-          tr('涨跌停 / 炸板池', '东方财富 push2ex'),
-          tr('财经日历', '东方财富数据中心（新股申购、财报预约披露、分红除权）'),
-          tr('大盘云图', '52etf.site 内嵌 iframe'),
-        ),
+  );
+
+  box.append(await updateCard());
+  box.append(dataSourceCard());
+  box.append(hotkeyCard());
+  box.append(disclaimerCard());
+  return box;
+}
+
+/* ── 版本与更新卡片 ────────────────────────────────────────────────────── */
+
+/** 只做安全的最简 Markdown 渲染：先转义，再套用少量行内规则 */
+function renderNotes(md) {
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let html = esc(md ?? '').trim();
+  if (html === '') return null;
+  html = html
+    .replace(/^#{1,6}\s*(.+)$/gm, '<b>$1</b>')
+    .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/^\s*[-*]\s+(.+)$/gm, '· $1')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '$1');
+  return h('div', { class: 'op-pre op-notes', html });
+}
+
+async function updateCard() {
+  const card = h('div', { class: 'op-card' });
+  card.append(h('h3', { text: '版本与更新' }));
+
+  const status = h('div', { class: 'op-upd-status' });
+  const progress = h('div', { class: 'op-bar' }, h('i', { style: { width: '0%' } }));
+  const logBox = h('div', { class: 'op-pre', style: { display: 'none' } });
+  let latest = null;
+
+  /* 仓库地址（可改） */
+  const repoInput = h('input', { class: 'tw-input', type: 'text', placeholder: 'owner/repo', value: state.prefs.updateRepo ?? '' });
+  repoInput.onchange = async () => {
+    const raw = repoInput.value.trim();
+    await patchQuiet({ updateRepo: raw });
+    repoInput.value = state.prefs.updateRepo ?? '';
+    latest = null;
+    paint();
+  };
+
+  const autoCtl = toggleCtl(state.prefs.autoUpdateCheck !== false, (v) => patchQuiet({ autoUpdateCheck: v }));
+  const preCtl = toggleCtl(!!state.prefs.includePrerelease, (v) => patchQuiet({ includePrerelease: v }));
+
+  const btnCheck = h('button', { class: 'tw-btn sm primary' }, '检查更新');
+  const btnOpen = h('button', { class: 'tw-btn sm' }, '打开发布页');
+  const btnZip = h('button', { class: 'tw-btn sm' }, '下载更新包');
+  const btnApply = h('button', { class: 'tw-btn sm' }, '选择扩展目录并更新');
+  const btnReload = h('button', { class: 'tw-btn sm primary' }, '重新加载扩展');
+
+  for (const b of [btnOpen, btnZip, btnApply, btnReload]) b.disabled = true;
+  btnOpen.onclick = () => latest?.htmlUrl && window.open(latest.htmlUrl, '_blank', 'noopener');
+  btnZip.onclick = () => latest?.zipUrl && window.open(latest.zipUrl, '_blank', 'noopener');
+
+  /* ── 状态渲染 ── */
+  const fmtTime = (ts) => (ts ? fmtDateTime(ts) : '—');
+
+  function paint() {
+    mount(status);
+    const l = latest;
+    if (!l) {
+      status.append(h('div', { class: 'tw-hint', text: '尚未检查。点击「检查更新」从 GitHub 读取最新版本信息。' }));
+      return;
+    }
+    if (!l.ok) {
+      status.append(
+        h('div', { class: 'op-badge warn', text: '检查失败' }),
+        h('div', { class: 'tw-hint', style: { marginTop: '5px', whiteSpace: 'pre-wrap' }, text: l.error ?? '未知错误' }),
+      );
+      if (l.errorKind === 'notfound') {
+        status.append(h('div', { class: 'tw-hint', style: { marginTop: '6px' } },
+          '仓库还没有公开内容。请先在 GitHub 创建该仓库并推送代码，或把上面的仓库地址改成你自己的 fork。'));
+      }
+      return;
+    }
+    const badge = l.comparable
+      ? l.hasUpdate
+        ? h('span', { class: 'op-badge up', text: '有新版本' })
+        : h('span', { class: 'op-badge ok', text: '已是最新' })
+      : h('span', { class: 'op-badge', text: '无法比较版本' });
+    status.append(
+      h('div', { class: 'tw-flex tw-gap6', style: { alignItems: 'center', flexWrap: 'wrap' } },
+        badge,
+        h('span', { style: { fontSize: '13px' } }, `当前 v${l.current}`),
+        h('span', { class: 'tw-hint' }, '→'),
+        h('span', { style: { fontSize: '13px', fontWeight: '600' } }, l.latestName || l.tag || '未知'),
+      ),
+      h('div', { class: 'tw-hint', style: { marginTop: '4px' } },
+        `来源：${sourceLabel(l.source)} · 检查于 ${fmtTime(l.checkedAt)}`),
+    );
+    if (l.comparable && !l.hasUpdate) {
+      status.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' } }, '本机版本不低于远端，无需更新。'));
+    }
+    if (!l.comparable) {
+      status.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' } },
+        '远端没有可解析的版本号（仓库未打 tag），无法判断新旧；可点「下载更新包」自行比对。'));
+    }
+    const notes = renderNotes(l.notes);
+    if (notes) {
+      status.append(h('div', { class: 'tw-label', style: { marginTop: '9px' }, text: '更新说明' }), notes);
+    }
+    btnOpen.disabled = !l.htmlUrl;
+    btnZip.disabled = !l.zipUrl;
+    // 必须能拿到一个可下载的 git ref，否则「就地更新」无从下手
+    btnApply.disabled = !refOf(l);
+  }
+
+  const sourceLabel = (s) => ({ release: 'GitHub Release', tag: 'Git tag', commit: '默认分支最新提交' }[s] ?? s ?? '未知');
+
+  /** 就地更新用的 git ref：优先 tag，其次分支 */
+  const refOf = (l) => l?.tag ?? l?.ref ?? null;
+
+  async function doCheck(force) {
+    btnCheck.disabled = true;
+    btnCheck.textContent = '检查中…';
+    try {
+      latest = await api.update.check(!!force);
+    } catch (error) {
+      latest = { ok: false, error: String(error?.message ?? error), current: chrome.runtime.getManifest().version };
+    } finally {
+      btnCheck.disabled = false;
+      btnCheck.textContent = '检查更新';
+      paint();
+    }
+  }
+
+  btnCheck.onclick = () => doCheck(true);
+
+  /* ── 一键就地更新 ── */
+  btnApply.onclick = async () => {
+    const ref = refOf(latest);
+    if (!ref) return;
+    if (!updater.supportsDirectoryWrite()) {
+      toast('当前浏览器不支持目录写入（需要 Chromium 系且为安全上下文）');
+      return;
+    }
+    try {
+      let handle = await updater.loadDirHandle();
+      if (!handle || !(await updater.ensurePermission(handle, { request: false }))) {
+        handle = await window.showDirectoryPicker({ id: 'tw-ext-root', mode: 'readwrite' });
+        // 防呆：选错目录会把一堆源码写到别处
+        try {
+          await handle.getFileHandle('manifest.json');
+        } catch {
+          toast('这个目录里没有 manifest.json，看起来不是扩展根目录');
+          return;
+        }
+        if (!(await updater.ensurePermission(handle))) {
+          toast('未获得该目录的读写权限');
+          return;
+        }
+        await updater.saveDirHandle(handle);
+      }
+
+      const ok = await confirmModal(
+        '就地更新',
+        `将把 ${latest.repo} @ ${ref} 的文件写入所选目录，只覆盖「新增」和「内容有变化」的文件，不会删除你本地多出来的文件。\n\n写入后需要点「重新加载扩展」才会生效。是否继续？`,
+      );
+      if (!ok) return;
+
+      btnApply.disabled = true;
+      logBox.style.display = 'block';
+      progress.style.display = 'block';
+      const bar = progress.querySelector('i');
+
+      const res = await updater.syncFromGitHub({
+        repo: latest.repo,
+        ref,
+        dirHandle: handle,
+        onProgress: ({ phase, done, total, path }) => {
+          if (phase === 'download') {
+            bar.style.width = '8%';
+            logBox.textContent = '正在下载归档包…';
+            return;
+          }
+          bar.style.width = `${Math.round((done / Math.max(1, total)) * 100)}%`;
+          logBox.textContent = `(${done}/${total}) ${path}`;
+        },
+      });
+
+      bar.style.width = '100%';
+      logBox.textContent =
+        `完成（传输方式：${res.transport === 'zip' ? '整包 zip' : '逐文件'}）：共 ${res.total} 个文件\n` +
+        `  新增 ${res.added.length} 个\n` +
+        `  覆盖 ${res.updated.length} 个\n` +
+        `  未变 ${res.unchanged.length} 个\n` +
+        (res.failed.length > 0 ? `  失败 ${res.failed.length} 个：\n${res.failed.map((f) => `    ${f.path} — ${f.error}`).join('\n')}` : '') +
+        (res.failed.length === 0 ? '\n\n点下方「重新加载扩展」即可生效。' : '\n\n部分文件失败，可稍后重试。');
+      toast(res.failed.length === 0 ? '更新文件已写入，请重新加载扩展' : '更新完成，但有文件失败');
+      if (res.failed.length === 0) btnReload.disabled = false;
+    } catch (error) {
+      if (error?.name === 'AbortError') toast('已取消');
+      else toast(`更新失败：${String(error?.message ?? error)}`);
+    } finally {
+      btnApply.disabled = false;
+    }
+  };
+
+  btnReload.onclick = () => chrome.runtime.reload();
+
+  /* ── 组装 ── */
+  card.append(
+    h('div', { class: 'op-row' },
+      h('div', { class: 'lbl' }, h('b', { text: '当前版本' }), h('span', { text: `v${m.version} · Manifest V${m.manifest_version}` })),
+      h('div', { class: 'ctl' }, btnCheck),
+    ),
+    h('div', { class: 'op-row' },
+      h('div', { class: 'lbl' }, h('b', { text: '更新仓库' }), h('span', { text: 'GitHub owner/repo，可改成本人 fork' })),
+      h('div', { class: 'ctl' }, repoInput),
+    ),
+    h('div', { class: 'op-row' },
+      h('div', { class: 'lbl' }, h('b', { text: '自动检查' }), h('span', { text: '每天检查一次，发现新版本时发系统通知' })),
+      h('div', { class: 'ctl' }, autoCtl),
+    ),
+    h('div', { class: 'op-row' },
+      h('div', { class: 'lbl' }, h('b', { text: '包含预发布' }), h('span', { text: '把 pre-release 也视为新版本' })),
+      h('div', { class: 'ctl' }, preCtl),
+    ),
+    h('div', { style: { marginTop: '8px' } }, status),
+    h('div', { class: 'op-actions', style: { marginTop: '10px' } }, btnOpen, btnZip),
+    h('div', { class: 'op-sep' }),
+    h('div', { style: { fontSize: '12.5px', lineHeight: '1.85', color: 'var(--tw-ink-2)' } },
+      h('b', { text: '一键更新（就地覆盖）' }),
+      h('br'),
+      '本扩展以「加载已解压的扩展」方式安装时，扩展目录对扩展自身的脚本是只读的 —— 浏览器不允许任何扩展 API 写自己的安装目录。',
+      '这里借助 File System Access API：你授权一次扩展根目录后，即可逐文件比对并覆盖写入，再点「重新加载扩展」生效。',
+      h('br'),
+      h('span', { class: 'tw-hint', text: '若扩展是从 Edge 加载项商店安装的，浏览器会自动升级，无需此操作。' }),
+    ),
+    h('div', { class: 'op-actions', style: { marginTop: '9px' } }, btnApply, btnReload),
+    progress,
+    logBox,
+  );
+
+  progress.style.display = 'none';
+  btnReload.disabled = true;
+  paint();
+  // 进页面即展示上次结果（若有），但不主动打网络
+  try {
+    const cached = await api.update.state();
+    if (cached) {
+      latest = cached;
+      paint();
+    }
+  } catch {
+    /* 忽略 */
+  }
+  return card;
+}
+
+/* ── 关于页的其余卡片 ──────────────────────────────────────────────────── */
+
+function dataSourceCard() {
+  return h('div', { class: 'op-card' },
+    h('h3', { text: '数据源（均为免费公开接口，延迟行情）' }),
+    h('table', { class: 'op-tbl' },
+      h('thead', {}, h('tr', {}, h('th', { text: '用途' }), h('th', { text: '来源' }))),
+      h('tbody', {},
+        tr('批量行情 / 板块榜 / 资金流', '东方财富 push2 / push2delay'),
+        tr('分时序列', '东方财富 trends2（多主机回退）'),
+        tr('多日分时（五日）', '腾讯 day/query 一分钟级（东财 trends2、5 分钟 K 线依次兜底）'),
+        tr('历史 K 线', '腾讯 fqkline（东财 push2his 兜底，本地缓存 + 增量更新）'),
+        tr('标的搜索', '东方财富 searchapi suggest'),
+        tr('涨跌停 / 炸板池', '东方财富 push2ex'),
+        tr('全市场涨跌幅分布', '东方财富 push2 clist 全 A 快照自行分档'),
+        tr('两市成交额', '腾讯 day/query 末条累计成交额（不依赖 push2）'),
+        tr('财经日历', '东方财富数据中心（新股申购、财报预约披露、分红除权）'),
+        tr('大盘云图', '52etf.site 内嵌 iframe'),
+        tr('版本更新', 'GitHub Releases / Tags API + raw 文件同步'),
       ),
     ),
-    h('div', { class: 'op-card' },
-      h('h3', { text: '快捷键' }),
-      h('div', { class: 'op-row' }, h('div', { class: 'lbl' }, h('b', { text: '打开弹窗' }), h('span', { text: '浏览器默认快捷键' })), h('div', { class: 'ctl' }, h('span', { class: 'op-kbd', text: 'Alt+Shift+T' }))),
-      h('div', { class: 'op-row' }, h('div', { class: 'lbl' }, h('b', { text: '缩放 K 线' }), h('span', { text: '在详情抽屉的 K 线区域' })), h('div', { class: 'ctl' }, h('span', { class: 'op-kbd', text: '滚轮' }))),
-      h('div', { class: 'op-row' }, h('div', { class: 'lbl' }, h('b', { text: '平移 K 线' }), h('span', { text: '在详情抽屉的 K 线区域' })), h('div', { class: 'ctl' }, h('span', { class: 'op-kbd', text: '拖拽' }))),
-      h('div', { class: 'op-row' }, h('div', { class: 'lbl' }, h('b', { text: '关闭抽屉 / 弹窗' }), h('span', { text: '' })), h('div', { class: 'ctl' }, h('span', { class: 'op-kbd', text: 'Esc' }))),
-    ),
-    h('div', { class: 'op-card' },
-      h('h3', { text: '免责声明' }),
-      h('div', { style: { fontSize: '12.5px', lineHeight: '1.9', color: 'var(--tw-ink-2)' } },
-        '· 本扩展使用免费公开接口的延迟行情（非 Level-2），盘中可能存在缺口或延迟，仅作盯盘参考。',
-        h('br'),
-        '· 上游对高频访问会限流；扩展已做多主机重试、TTL 缓存与 last-known-good 回填，但仍可能出现短暂无数据。',
-        h('br'),
-        '· 持仓账本为个人记账工具，盈亏口径见「持仓」页说明；跨市场标的未做汇率折算。',
-        h('br'),
-        '· 护盘信号仅识别「放量 + 主力净流入」的行为模式，不能证明买入方身份。',
-        h('br'),
-        '· 本扩展不构成任何投资建议，使用风险自负。',
-      ),
+  );
+}
+
+function hotkeyCard() {
+  const row = (b, s, key) =>
+    h('div', { class: 'op-row' },
+      h('div', { class: 'lbl' }, h('b', { text: b }), h('span', { text: s })),
+      h('div', { class: 'ctl' }, h('span', { class: 'op-kbd', text: key })));
+  return h('div', { class: 'op-card' },
+    h('h3', { text: '快捷键' }),
+    row('打开弹窗', '浏览器默认快捷键', 'Alt+Shift+T'),
+    row('缩放 K 线', '在详情抽屉的 K 线区域', '滚轮'),
+    row('平移 K 线', '在详情抽屉的 K 线区域', '拖拽'),
+    row('关闭抽屉 / 弹窗', '', 'Esc'),
+  );
+}
+
+function disclaimerCard() {
+  return h('div', { class: 'op-card' },
+    h('h3', { text: '免责声明' }),
+    h('div', { style: { fontSize: '12.5px', lineHeight: '1.9', color: 'var(--tw-ink-2)' } },
+      '· 本扩展使用免费公开接口的延迟行情（非 Level-2），盘中可能存在缺口或延迟，仅作盯盘参考。',
+      h('br'),
+      '· 上游对高频访问会限流；扩展已做多主机重试、TTL 缓存与 last-known-good 回填，但仍可能出现短暂无数据。',
+      h('br'),
+      '· 持仓账本为个人记账工具，盈亏口径见「持仓」页说明；跨市场标的未做汇率折算。',
+      h('br'),
+      '· 护盘信号仅识别「放量 + 主力净流入」的行为模式，不能证明买入方身份。',
+      h('br'),
+      '· 本扩展不构成任何投资建议，使用风险自负。',
     ),
   );
 }
@@ -325,7 +615,7 @@ function render() {
 
   const main = qs('#main');
   const map = { appearance: renderAppearance, alerts: renderAlerts, data: renderData, about: renderAbout };
-  const head = { appearance: ['外观与刷新', '调整主题、配色、隐私模式与刷新节奏'], alerts: ['价格预警', '设置价格 / 涨跌幅提醒，触发后推送系统通知'], data: ['数据管理', '导出、导入与重置本地数据'], about: ['关于', '版本信息、数据源与免责声明'] }[state.section];
+  const head = { appearance: ['外观与刷新', '调整主题、配色、隐私模式与刷新节奏'], alerts: ['价格预警', '设置价格 / 涨跌幅提醒，触发后推送系统通知'], data: ['数据管理', '导出、导入与重置本地数据'], about: ['关于', '版本检查与更新、数据源与免责声明'] }[state.section];
   mount(main, h('h2', { class: 'op-h', text: head[0] }), h('div', { class: 'op-sub', text: head[1] }));
   const content = map[state.section]();
   if (content instanceof Promise) content.then((node) => main.append(node));

@@ -7,7 +7,7 @@
  */
 import { s, h } from './dom.js';
 import { SMA, MACD, MA_CONFIG } from '../shared/indicators.js';
-import { fmtAmt, fmtPct, fmtPrice, fmtVol, isNum } from '../shared/format.js';
+import { fmtAmt, fmtInt, fmtPct, fmtPrice, fmtVol, isNum, sessionLabel } from '../shared/format.js';
 
 /** 读取当前主题的调色板（把 CSS 变量解析成具体颜色） */
 export function palette() {
@@ -54,6 +54,35 @@ function fmtAxis(v, span) {
   if (span < 0.5) return v.toFixed(3);
   if (span < 20) return v.toFixed(2);
   return v.toFixed(0);
+}
+
+/* ── 自适应宽度 ───────────────────────────────────────────────────────── */
+
+/**
+ * 按容器**实测宽度**渲染，并在宽度变化时重绘。
+ *
+ * 为什么不能固定 640 再靠 viewBox 缩放：
+ * 侧边栏实际只有 300~420px，viewBox 640 缩到 320px 会把 9px 的字号压成 4.5px，
+ * 图例、档位标签、时间刻度全部糊成一团。用真实宽度画，字号才是所见即所得。
+ *
+ * 返回 destroy()（当前调用方都不需要，保留以备后用）。
+ */
+function withWidth(container, fallback = 640, render) {
+  const measure = () => {
+    const w = container.clientWidth || container.getBoundingClientRect?.().width || 0;
+    return Math.max(220, Math.round(w || fallback));
+  };
+  render(measure());
+  if (typeof ResizeObserver !== 'function') return () => {};
+  let last = measure();
+  const ro = new ResizeObserver(() => {
+    const w = measure();
+    if (Math.abs(w - last) < 8) return;   // 阈值避免滚动条出现/消失引发的抖动循环
+    last = w;
+    render(w);
+  });
+  ro.observe(container);
+  return () => ro.disconnect();
 }
 
 /* ───────────────────────────── 缩略线 ───────────────────────────────── */
@@ -109,6 +138,9 @@ export function dayBar(q, { redUp = true } = {}) {
 /**
  * 全市场涨跌分布（11 档，涨→平→跌）。
  * bins: [{ label, side: 'up'|'flat'|'down', count }]
+ *
+ * 宽度按容器实测值走：侧边栏里 11 档要挤进 ~300px，
+ * 窄的时候自动缩小字号并去掉最次要的占比行，避免标签糊成一团。
  */
 export function distributionChart(container, { bins, redUp = true, height = 158 } = {}) {
   const p = palette();
@@ -118,50 +150,56 @@ export function distributionChart(container, { bins, redUp = true, height = 158 
     container.append(h('div', { class: 'tw-hint tw-center', style: { padding: '20px 0' }, text: '暂无涨跌分布数据' }));
     return;
   }
-  const W = 640;
   const H = height;
-  const padL = 34;
-  const padR = 10;
-  const padT = 20;
-  const padB = 28;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
   const max = Math.max(1, ...list.map((b) => Number(b.count) || 0));
-  const step = innerW / list.length;
-  const barW = Math.max(7, step * 0.6);
   const total = list.reduce((a, b) => a + (Number(b.count) || 0), 0);
-
-  // 注意：s() 走 setAttribute，style 必须传字符串；传对象会被序列化成 "[object Object]" 而失效
-  const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet', style: 'width:100%;height:auto;display:block' });
   const colOf = (side) => (side === 'flat' ? p.flat : (side === 'up') === redUp ? p.up : p.down);
 
-  // 横向网格 + 刻度
-  for (const t of niceTicks(0, max, 3)) {
-    const y = padT + innerH - (t / max) * innerH;
-    svg.append(s('line', { x1: padL, y1: y, x2: padL + innerW, y2: y, stroke: p.grid, 'stroke-width': 0.6, 'stroke-dasharray': '2 4' }));
-    svg.append(s('text', { x: padL - 5, y: y + 3, 'text-anchor': 'end', fill: p.ink3, 'font-size': 9, 'font-family': 'var(--tw-mono)' }, String(Math.round(t))));
-  }
+  withWidth(container, 640, (W) => {
+    [...container.querySelectorAll('svg')].forEach((n) => n.remove());
+    const narrow = W < 440;
+    const padL = narrow ? 26 : 34;
+    const padR = 8;
+    const padT = 20;
+    const padB = narrow ? 26 : 28;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const step = innerW / list.length;
+    const barW = Math.max(6, step * 0.62);
+    const fsVal = narrow ? 7.5 : 9;
+    const fsLabel = narrow ? 7 : 8.5;
 
-  list.forEach((b, i) => {
-    const n = Number(b.count) || 0;
-    const bh = max > 0 ? (n / max) * innerH : 0;
-    const x = padL + step * i + (step - barW) / 2;
-    const y = padT + innerH - bh;
-    const col = colOf(b.side);
-    svg.append(s('rect', { x, y, width: barW, height: Math.max(bh, n > 0 ? 1.5 : 0), rx: Math.min(2, barW / 3), fill: col, opacity: n === max ? 1 : 0.82 }));
-    // 数值
-    svg.append(s('text', { x: x + barW / 2, y: y - 4, 'text-anchor': 'middle', fill: p.ink2, 'font-size': 9, 'font-weight': 600, 'font-family': 'var(--tw-mono)' }, String(n)));
-    // 档位
-    svg.append(s('text', { x: x + barW / 2, y: padT + innerH + 12, 'text-anchor': 'middle', fill: i === 5 ? p.ink2 : col, 'font-size': 8.5 }, b.label));
-    // 占比
-    if (total > 0 && n > 0) {
-      svg.append(s('text', { x: x + barW / 2, y: padT + innerH + 21, 'text-anchor': 'middle', fill: p.ink3, 'font-size': 7.5, 'font-family': 'var(--tw-mono)' }, `${((n / total) * 100).toFixed(1)}%`));
+    // 注意：s() 走 setAttribute，style 必须传字符串；传对象会被序列化成 "[object Object]" 而失效
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet', style: 'width:100%;height:auto;display:block' });
+
+    // 横向网格 + 刻度
+    for (const t of niceTicks(0, max, 3)) {
+      const y = padT + innerH - (t / max) * innerH;
+      svg.append(s('line', { x1: padL, y1: y, x2: padL + innerW, y2: y, stroke: p.grid, 'stroke-width': 0.6, 'stroke-dasharray': '2 4' }));
+      svg.append(s('text', { x: padL - 4, y: y + 3, 'text-anchor': 'end', fill: p.ink3, 'font-size': fsVal, 'font-family': 'var(--tw-mono)' }, String(Math.round(t))));
     }
-  });
 
-  // 基准轴
-  svg.append(s('line', { x1: padL, y1: padT + innerH, x2: padL + innerW, y2: padT + innerH, stroke: p.grid, 'stroke-width': 1 }));
-  container.append(svg);
+    list.forEach((b, i) => {
+      const n = Number(b.count) || 0;
+      const bh = max > 0 ? (n / max) * innerH : 0;
+      const x = padL + step * i + (step - barW) / 2;
+      const y = padT + innerH - bh;
+      const col = colOf(b.side);
+      svg.append(s('rect', { x, y, width: barW, height: Math.max(bh, n > 0 ? 1.5 : 0), rx: Math.min(2, barW / 3), fill: col, opacity: n === max ? 1 : 0.82 }));
+      // 数值
+      svg.append(s('text', { x: x + barW / 2, y: y - 3.5, 'text-anchor': 'middle', fill: p.ink2, 'font-size': fsVal, 'font-weight': 600, 'font-family': 'var(--tw-mono)' }, String(n)));
+      // 档位
+      svg.append(s('text', { x: x + barW / 2, y: padT + innerH + 12, 'text-anchor': 'middle', fill: i === 5 ? p.ink2 : col, 'font-size': fsLabel }, b.label));
+      // 占比（窄容器下省掉，它是最次要的一行）
+      if (!narrow && total > 0 && n > 0) {
+        svg.append(s('text', { x: x + barW / 2, y: padT + innerH + 21, 'text-anchor': 'middle', fill: p.ink3, 'font-size': 7.5, 'font-family': 'var(--tw-mono)' }, `${((n / total) * 100).toFixed(1)}%`));
+      }
+    });
+
+    // 基准轴
+    svg.append(s('line', { x1: padL, y1: padT + innerH, x2: padL + innerW, y2: padT + innerH, stroke: p.grid, 'stroke-width': 1 }));
+    container.append(svg);
+  });
 }
 
 /* ───────────────────────────── 分时图 ───────────────────────────────── */
@@ -615,4 +653,240 @@ export function klineChart(container, { redUp = true, height = 320, markers = []
       tip.remove();
     },
   };
+}
+
+/* ─────────────────── 两融走势（净买额柱 + 指数线） ───────────────────── */
+
+/**
+ * 两融走势：近期每个交易日的**融资净买额**（正负双色柱，零轴居中）
+ * 叠加**参照指数**（沪深300，右轴归一化）折线。
+ *
+ * 为什么不做「余额柱」：两融余额是存量，90 个交易日里只在 2.6 万亿附近缓慢漂移，
+ * 柱高几乎一样，视觉上传达不出信息。净买额才是流量口径，正负分明、日间差异大。
+ * 余额的最新值与区间变化改由副标题承载。
+ *
+ * @param {HTMLElement} container
+ * @param {{series:Array<{date:string,balance:number,netBuy:number,index:number|null}>, indexName?:string, height?:number}} opts
+ */
+export function marginChart(container, { series = [], indexName = '沪深300', redUp = true, height = 158 } = {}) {
+  const p = palette();
+  container.textContent = '';
+  const all = (Array.isArray(series) ? series : []).filter((r) => r && typeof r.date === 'string');
+  if (all.length < 2) {
+    container.append(h('div', { class: 'tw-hint tw-center', style: { padding: '18px 0' }, text: '两融数据暂不可用' }));
+    return;
+  }
+  const list = all.slice(-60);   // 面板窄，取近 60 个交易日足够看趋势
+
+  const yi = (v) => (isNum(v) ? v / 1e8 : null);         // 元 → 亿元
+  let flow = list.map((r) => yi(r.netBuy));
+  const hasFlow = flow.some(isNum);
+  // 净买额整体缺失时退化用余额（截断到区间极值，避免全平柱）
+  if (!hasFlow) {
+    const bal = list.map((r) => yi(r.balance)).filter(isNum);
+    if (bal.length > 1) {
+      const lo = Math.min(...bal);
+      flow = list.map((r) => {
+        const v = yi(r.balance);
+        return isNum(v) ? v - lo : null;
+      });
+    }
+  }
+  const maxAbs = Math.max(1e-6, ...flow.filter(isNum).map(Math.abs));
+
+  const closes = list.map((r) => (isNum(r.index) ? r.index : null));
+  const validClose = closes.filter(isNum);
+  const cMin = validClose.length > 1 ? Math.min(...validClose) : null;
+  const cMax = validClose.length > 1 ? Math.max(...validClose) : null;
+  const hasIndex = cMin !== null && cMax !== null && cMax > cMin;
+
+  const H = height;
+
+  withWidth(container, 640, (W) => {
+    [...container.querySelectorAll('svg,.tw-legend')].forEach((n) => n.remove());
+    const padL = 34;
+    const padR = hasIndex ? 42 : 10;
+    const padT = 16;
+    const padB = 20;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const zeroY = padT + innerH / 2;
+    const axisFs = W < 420 ? 7.5 : 8.5;
+
+    // 注意：s() 走 setAttribute，style 必须是字符串
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet', style: 'width:100%;height:auto;display:block' });
+    const X = (i) => padL + (list.length === 1 ? innerW / 2 : (i / (list.length - 1)) * innerW);
+
+    // 横向网格（对称零轴）
+    for (const f of [1, 0.5, 0, -0.5, -1]) {
+      const y = zeroY - f * (innerH / 2);
+      svg.append(s('line', { x1: padL, y1: y, x2: padL + innerW, y2: y, stroke: p.grid, 'stroke-width': f === 0 ? 0.9 : 0.6, 'stroke-dasharray': f === 0 ? 'none' : '2 4' }));
+      if (f === 1 || f === 0 || f === -1) {
+        const v = f * maxAbs;
+        svg.append(s('text', { x: padL - 4, y: y + 3, 'text-anchor': 'end', fill: p.ink3, 'font-size': axisFs, 'font-family': 'var(--tw-mono)' }, `${v >= 0 ? '' : '-'}${Math.abs(v) >= 100 ? Math.round(Math.abs(v)) : Math.abs(v).toFixed(0)}`));
+      }
+    }
+
+    // 净买额柱
+    const step = innerW / Math.max(1, list.length);
+    const barW = Math.max(1.2, step * 0.62);
+    list.forEach((r, i) => {
+      const v = flow[i];
+      if (!isNum(v)) return;
+      const h2 = (Math.abs(v) / maxAbs) * (innerH / 2);
+      const up = v >= 0;
+      const col = up === redUp ? p.up : p.down;
+      const x = X(i) - barW / 2;
+      svg.append(s('rect', { x, y: up ? zeroY - h2 : zeroY, width: barW, height: Math.max(h2, 0.8), rx: Math.min(1.5, barW / 3), fill: col, opacity: 0.85 }));
+    });
+
+    // 指数折线（右轴归一化）
+    if (hasIndex) {
+      const Y = (v) => padT + (1 - (v - cMin) / (cMax - cMin)) * innerH;
+      let d = '';
+      let started = false;
+      closes.forEach((v, i) => {
+        if (!isNum(v)) {
+          started = false;
+          return;
+        }
+        d += `${started ? 'L' : 'M'}${X(i).toFixed(2)},${Y(v).toFixed(2)} `;
+        started = true;
+      });
+      if (d) {
+        svg.append(s('path', { d: d.trim(), fill: 'none', stroke: p.accent, 'stroke-width': 1.3, 'stroke-linejoin': 'round', opacity: 0.9 }));
+        const lastIdx = closes.reduce((acc, v, i) => (isNum(v) ? i : acc), -1);
+        if (lastIdx >= 0) svg.append(s('circle', { cx: X(lastIdx), cy: Y(closes[lastIdx]), r: 2, fill: p.accent }));
+        svg.append(s('text', { x: padL + innerW + 3, y: padT + 6, 'text-anchor': 'start', fill: p.accent, 'font-size': axisFs }, indexName));
+        svg.append(s('text', { x: padL + innerW + 3, y: padT + 17, 'text-anchor': 'start', fill: p.ink3, 'font-size': axisFs - 0.5, 'font-family': 'var(--tw-mono)' }, String(Math.round(cMax))));
+        svg.append(s('text', { x: padL + innerW + 3, y: padT + innerH, 'text-anchor': 'start', fill: p.ink3, 'font-size': axisFs - 0.5, 'font-family': 'var(--tw-mono)' }, String(Math.round(cMin))));
+      }
+    }
+
+    // 首尾日期
+    svg.append(s('text', { x: padL, y: H - 5, 'text-anchor': 'start', fill: p.ink3, 'font-size': 8, 'font-family': 'var(--tw-mono)' }, list[0].date.slice(5)));
+    svg.append(s('text', { x: padL + innerW, y: H - 5, 'text-anchor': 'end', fill: p.ink3, 'font-size': 8, 'font-family': 'var(--tw-mono)' }, list[list.length - 1].date.slice(5)));
+
+    container.append(svg);
+
+    container.append(
+      h('div', { class: 'tw-legend' },
+        h('span', { class: 'tw-legend-i' }, h('i', { class: 'sw up' }), hasFlow ? '融资净买额（亿元）' : '两融余额（区间）'),
+        hasIndex ? h('span', { class: 'tw-legend-i' }, h('i', { class: 'sw line' }), indexName) : null,
+      ),
+    );
+  });
+}
+
+/** palette 里 up/down 已按当前主题解析 */
+
+/* ─────────────────── 涨跌家数分时（上涨 / 下跌面积） ─────────────────── */
+
+/**
+ * 全市场上涨/下跌家数的日内分时。
+ *
+ * 数据来源是 service worker 按分钟**累积采样**（免费源没有历史端点），
+ * 所以当天首次打开时曲线很短，需要挂着才逐渐完整 —— 因此点位少时要给出明确提示，
+ * 而不是画一条看起来「坏了」的直线。
+ *
+ * 横轴用 `p`（sessionPos 归一化的交易时段进度，午休已折叠），
+ * 刻度用 `sessionLabel` 反查真实钟点。
+ *
+ * @param {HTMLElement} container
+ * @param {{points:Array<{t:number,p:number,up:number,down:number,flat?:number}>, prevPoints?:Array, prevDate?:string|null, height?:number}} opts
+ */
+export function breadthChart(container, { points = [], prevPoints = [], prevDate = null, height = 158 } = {}) {
+  const p = palette();
+  container.textContent = '';
+  const pts = (Array.isArray(points) ? points : [])
+    .filter((d) => isNum(d?.p) && isNum(d?.up) && isNum(d?.down))
+    .sort((a, b) => a.p - b.p);
+  const prev = (Array.isArray(prevPoints) ? prevPoints : [])
+    .filter((d) => isNum(d?.p) && isNum(d?.up))
+    .sort((a, b) => a.p - b.p);
+
+  if (pts.length < 2) {
+    container.append(
+      h('div', { class: 'tw-empty', style: { padding: '16px 0', fontSize: '11px' } },
+        prev.length > 1 ? `今日采样累积中（已 ${pts.length} 点）· 下方虚线为 ${prevDate ?? '上一交易日'} 对照` : '上涨/下跌家数分时累积中：免费源没有历史端点，面板打开期间每分钟采样一次、约 3 分钟出一个点（需东财行情主机可用）。'),
+    );
+    // 只有昨日数据时也画出来，至少不是空白
+    if (prev.length > 1) withWidth(container, 640, draw);
+    return;
+  }
+  withWidth(container, 640, draw);
+
+  function draw(W) {
+    [...container.querySelectorAll('svg,.tw-legend')].forEach((n) => n.remove());
+    const H = height;
+    const padL = 30;
+    const padR = 8;
+    const padT = 16;
+    const padB = 20;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const vals = [...pts.map((d) => d.up), ...pts.map((d) => d.down), ...prev.map((d) => d.up)];
+    const max = Math.max(1, ...vals);
+    const top = max * 1.08;
+    const Y = (v) => padT + (1 - v / top) * innerH;
+    const X = (q) => padL + Math.max(0, Math.min(1, q)) * innerW;
+    const axisFs = W < 420 ? 7.5 : 8.5;
+
+    const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'xMidYMid meet', style: 'width:100%;height:auto;display:block' });
+
+    for (const t of niceTicks(0, max, 3)) {
+      const y = Y(t);
+      svg.append(s('line', { x1: padL, y1: y, x2: padL + innerW, y2: y, stroke: p.grid, 'stroke-width': 0.6, 'stroke-dasharray': '2 4' }));
+      svg.append(s('text', { x: padL - 4, y: y + 3, 'text-anchor': 'end', fill: p.ink3, 'font-size': axisFs, 'font-family': 'var(--tw-mono)' }, String(Math.round(t))));
+    }
+    // 时段刻度（午休折叠后均匀铺开）
+    for (const q of [0, 0.25, 0.5, 0.75, 1]) {
+      const x = X(q);
+      svg.append(s('line', { x1: x, y1: padT, x2: x, y2: padT + innerH, stroke: p.grid, 'stroke-width': 0.5, 'stroke-dasharray': '2 4', opacity: 0.7 }));
+      svg.append(s('text', { x, y: padT + innerH + 11, 'text-anchor': q === 0 ? 'start' : q === 1 ? 'end' : 'middle', fill: p.ink3, 'font-size': axisFs - 0.5, 'font-family': 'var(--tw-mono)' }, sessionLabel(q)));
+    }
+
+    // 昨日上涨家数（虚线对照）
+    if (prev.length > 1) {
+      svg.append(s('path', { d: linePath(prev.map((d) => [X(d.p), Y(d.up)]), false), fill: 'none', stroke: p.ink3, 'stroke-width': 1, 'stroke-dasharray': '3 3', opacity: 0.65 }));
+    }
+
+    // 今日上涨 / 下跌（pts 可能为空 —— 比如当天还没采到点、只有昨日数据）
+    if (pts.length > 0) {
+      // 下跌画在下层，避免遮住上涨线
+      svg.append(s('path', { d: areaPath(pts.map((d) => [X(d.p), Y(d.down)]), padT + innerH), fill: p.down, opacity: 0.1 }));
+      svg.append(s('path', { d: linePath(pts.map((d) => [X(d.p), Y(d.down)])), fill: 'none', stroke: p.down, 'stroke-width': 1.3, 'stroke-linejoin': 'round' }));
+
+      svg.append(s('path', { d: areaPath(pts.map((d) => [X(d.p), Y(d.up)]), padT + innerH), fill: p.up, opacity: 0.12 }));
+      svg.append(s('path', { d: linePath(pts.map((d) => [X(d.p), Y(d.up)])), fill: 'none', stroke: p.up, 'stroke-width': 1.5, 'stroke-linejoin': 'round' }));
+
+      const last = pts[pts.length - 1];
+      svg.append(s('circle', { cx: X(last.p), cy: Y(last.up), r: 2.2, fill: p.up }));
+      svg.append(s('circle', { cx: X(last.p), cy: Y(last.down), r: 2.2, fill: p.down }));
+    }
+
+    container.append(svg);
+
+    const last = pts[pts.length - 1] ?? null;
+    container.append(
+      h('div', { class: 'tw-legend' },
+        last ? h('span', { class: 'tw-legend-i' }, h('i', { class: 'sw up' }), `上涨 ${fmtInt(last.up)}`) : null,
+        last ? h('span', { class: 'tw-legend-i' }, h('i', { class: 'sw down' }), `下跌 ${fmtInt(last.down)}`) : null,
+        prev.length > 1 ? h('span', { class: 'tw-legend-i' }, h('i', { class: 'sw dash' }), `${prevDate ?? '上日'}上涨`) : null,
+        h('span', { class: 'tw-hint', style: { marginLeft: 'auto' }, text: `${pts.length} 点采样` }),
+      ),
+    );
+  }
+}
+
+function linePath(pairs, move = true) {
+  return pairs.map(([x, y], i) => `${i === 0 && move ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+}
+
+function areaPath(pairs, baseY) {
+  if (pairs.length === 0) return '';
+  const head = `M${pairs[0][0].toFixed(2)},${pairs[0][1].toFixed(2)}`;
+  const body = pairs.slice(1).map(([x, y]) => `L${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+  const tail = ` L${pairs[pairs.length - 1][0].toFixed(2)},${baseY.toFixed(2)} L${pairs[0][0].toFixed(2)},${baseY.toFixed(2)} Z`;
+  return `${head} ${body}${tail}`;
 }

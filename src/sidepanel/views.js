@@ -2,14 +2,14 @@
  * 侧边栏各页签视图。每个 render 函数负责取数 + 渲染，通过 ctx 与外壳通信。
  * ctx: { state, body, redUp, setStatus, reschedule, render, openDrawer, registerQuote, patchQuotes }
  */
-import { h, mount, qs, toast, promptModal, confirmModal } from '../ui/dom.js';
+import { h, mount, toast, promptModal, confirmModal } from '../ui/dom.js';
 import * as api from '../ui/api.js';
-import { sparkline, dayBar, distributionChart } from '../ui/charts.js';
+import { sparkline, distributionChart, marginChart, breadthChart } from '../ui/charts.js';
 import {
-  fmtAmt, fmtAmtLike, fmtChg, fmtDate, fmtInt, fmtPct, fmtPrice, fmtVol, marketLabel,
+  fmtAmt, fmtAmtLike, fmtChg, fmtDate, fmtInt, fmtPct, fmtPrice, marketLabel,
   pctClass, secidSplit,
 } from '../shared/format.js';
-import { ALERT_FIELD_LABEL, BOARD_SCOPES, CAL_CATEGORY_LABEL, CORE_INDICES, RANGE_TABS } from '../shared/model.js';
+import { ALERT_FIELD_LABEL, BOARD_SCOPES, CAL_CATEGORY_LABEL } from '../shared/model.js';
 
 /* ── 通用小组件 ───────────────────────────────────────────────────────── */
 
@@ -73,47 +73,56 @@ function watchRow(ctx, item) {
 /* ── 概览 ─────────────────────────────────────────────────────────────── */
 
 /**
- * 涨跌分布模块（宏观）。
- * 含：涨跌趋势（上涨/平盘/下跌 + 涨停/炸板/跌停）、成交量（当日/昨日/变动/预测全天）、
- * 全市场涨跌幅 11 档分布图。抽成独立函数便于在预览页复用同一份渲染逻辑。
+ * 概览 · 涨跌分布模块（宏观）。
+ *
+ * 两栏布局（窄侧边栏下由容器查询自动堆叠为单栏）：
+ *   左栏 —— 涨跌趋势（上涨/平盘/下跌 + 涨停/跌停）、成交量、两融走势
+ *   右栏 —— 全市场涨跌幅 11 档分布柱状图、上涨下跌家数分时
+ *
+ * 抽成独立函数便于在预览页复用同一份渲染逻辑。
  */
-export function distributionSection(ctx, { breadth, zt, zb, dt, dist, turn } = {}) {
+export function distributionSection(ctx, { breadth, zt, zb, dt, dist, turn, margin, bseries } = {}) {
   const up = dist?.up ?? breadth?.up ?? null;
   const down = dist?.down ?? breadth?.down ?? null;
   const flat = dist?.flat ?? breadth?.even ?? null;
-  const sec = h('div', { class: 'pn-sec' });
+
+  const sec = h('div', { class: 'pn-sec pn-ov' });
   sec.append(secHeader(
     '涨跌分布',
     h('span', { class: 'tw-hint', text: dist ? `全市场 ${fmtInt(dist.total)} 只` : breadth?.available ? '沪深两市' : '涨跌家数暂缺' }),
   ));
 
-  if (up !== null) {
-    sec.append(h('div', { class: 'tw-label', text: '涨跌趋势' }));
-    sec.append(h('div', { class: 'pn-grid3', style: { marginTop: '4px' } },
-      kpi('上涨', fmtInt(up), pctClass(1, ctx.redUp)),
-      kpi('平盘', fmtInt(flat ?? 0), ''),
-      kpi('下跌', fmtInt(down), pctClass(-1, ctx.redUp)),
-    ));
-    sec.append(h('div', { class: 'pn-breadth', style: { marginTop: '7px' } },
+  const left = h('div', { class: 'pn-ov-col' });
+  const right = h('div', { class: 'pn-ov-col' });
+
+  /* ── 左栏 ①：涨跌趋势（单行 5 项） ── */
+  left.append(h('div', { class: 'tw-label', text: '涨跌趋势' }));
+  left.append(h('div', { class: 'pn-grid5', style: { marginTop: '4px' } },
+    kpi('上涨', up === null ? '—' : fmtInt(up), pctClass(1, ctx.redUp)),
+    kpi('平盘', flat === null ? '—' : fmtInt(flat), ''),
+    kpi('下跌', down === null ? '—' : fmtInt(down), pctClass(-1, ctx.redUp)),
+    kpi('涨停', String(zt?.total ?? '—'), pctClass(1, ctx.redUp)),
+    kpi('跌停', String(dt?.total ?? '—'), pctClass(-1, ctx.redUp)),
+  ));
+  if (up !== null && down !== null) {
+    left.append(h('div', { class: 'pn-breadth', style: { marginTop: '6px' } },
       h('div', { style: { flex: String(Math.max(1, up)), background: 'var(--tw-up-ink)' }, text: String(up) }),
       h('div', { style: { flex: '0 0 32px', background: 'var(--tw-flat-ink)' }, text: String(flat ?? 0) }),
       h('div', { style: { flex: String(Math.max(1, down)), background: 'var(--tw-down-ink)' }, text: String(down) }),
     ));
   } else {
-    sec.append(h('div', { class: 'tw-hint', text: '涨跌家数需行情主机返回统计字段，限流时短暂缺失，稍后自动重试。' }));
+    left.append(h('div', { class: 'tw-hint', style: { marginTop: '6px' }, text: '涨跌家数需行情主机返回统计字段，限流时短暂缺失，稍后自动重试。' }));
   }
-  sec.append(h('div', { class: 'pn-grid3', style: { marginTop: '6px' } },
-    kpi('涨停', String(zt?.total ?? '—'), pctClass(1, ctx.redUp)),
-    kpi('炸板', String(zb?.total ?? '—'), 'tw-flat', null, zb?.total && zt?.total ? `炸板率 ${((zb.total / (zt.total + zb.total)) * 100).toFixed(0)}%` : null),
-    kpi('跌停', String(dt?.total ?? '—'), pctClass(-1, ctx.redUp)),
-  ));
+  if (zb?.total && zt?.total) {
+    left.append(h('div', { class: 'tw-hint', style: { marginTop: '3px' }, text: `炸板 ${zb.total} 只 · 炸板率 ${((zb.total / (zt.total + zb.total)) * 100).toFixed(0)}%` }));
+  }
 
-  // 成交量（当日 / 昨日 / 变动 / 预测全天）
+  /* ── 左栏 ②：成交量 ── */
   if (turn) {
     const prog = Number.isFinite(turn.progress) ? turn.progress : 1;
     const forecast = prog > 0.02 && prog < 0.995 ? turn.today / prog : turn.today;
-    sec.append(h('div', { class: 'tw-label', style: { marginTop: '10px' }, text: '成交量' }));
-    sec.append(h('div', { class: 'pn-grid2', style: { marginTop: '4px' } },
+    left.append(h('div', { class: 'tw-label', style: { marginTop: '10px' }, text: '成交量' }));
+    left.append(h('div', { class: 'pn-grid2', style: { marginTop: '4px' } },
       kpi('当日成交额', fmtAmt(turn.today)),
       // 变动/前值刻意跟随当日成交额的单位，避免「1.65万亿」与「-1116.19亿」并排难以比较
       kpi('昨日成交', fmtAmt(turn.prev), '', null, turn.prevDate ? `较前日 ${fmtAmtLike(turn.change, turn.today)}` : null),
@@ -122,15 +131,47 @@ export function distributionSection(ctx, { breadth, zt, zb, dt, dist, turn } = {
     ));
   }
 
-  // 全市场涨跌幅分布
-  if (dist?.bins?.length) {
-    sec.append(h('div', { class: 'tw-label', style: { marginTop: '10px' }, text: '涨跌幅分布' }));
-    const chartBox = h('div', { class: 'tw-dist' });
-    sec.append(chartBox);
-    distributionChart(chartBox, { bins: dist.bins, redUp: ctx.redUp });
+  /* ── 左栏 ③：两融走势 ── */
+  left.append(h('div', { class: 'tw-label', style: { marginTop: '10px' }, text: '两融走势' }));
+  if (margin?.series?.length > 1) {
+    const latest = margin.latest;
+    left.append(h('div', { class: 'tw-hint tw-num', style: { marginTop: '2px' } },
+      `最新两融余额 ${fmtAmt(latest?.balance)}（${latest?.date ?? ''}）`,
+      Number.isFinite(margin.balanceChange) ? ` · 区间 ${fmtAmtLike(margin.balanceChange, latest?.balance)}` : '',
+      Number.isFinite(margin.indexChangePct) ? ` · ${margin.indexName} ${fmtPct(margin.indexChangePct)}` : '',
+    ));
+    const mBox = h('div', { class: 'tw-dist' });
+    left.append(mBox);
+    marginChart(mBox, { series: margin.series, indexName: margin.indexName, redUp: ctx.redUp, height: 148 });
   } else {
-    sec.append(h('div', { class: 'tw-hint', style: { marginTop: '6px' }, text: '涨跌幅分布需要全市场快照，上游繁忙时自动跳过。' }));
+    left.append(h('div', { class: 'tw-hint', style: { marginTop: '3px' }, text: '两融数据源（东财数据中心）暂不可达，稍后自动重试。' }));
   }
+
+  /* ── 右栏 ①：涨跌幅分布柱状图 ── */
+  right.append(h('div', { class: 'tw-label', text: '涨跌幅分布' }));
+  if (dist?.bins?.length) {
+    const chartBox = h('div', { class: 'tw-dist' });
+    right.append(chartBox);
+    distributionChart(chartBox, { bins: dist.bins, redUp: ctx.redUp, height: 150 });
+  } else {
+    right.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' }, text: '涨跌幅分布需要全市场快照，上游繁忙时自动跳过。' }));
+  }
+
+  /* ── 右栏 ②：上涨下跌家数分时 ── */
+  right.append(h('div', { class: 'tw-label', style: { marginTop: '10px' } },
+    '上涨下跌家数分时',
+    bseries?.prevDate ? h('span', { class: 'tw-hint', style: { marginLeft: '6px' } }, `对照 ${bseries.prevDate}`) : null,
+  ));
+  const bBox = h('div', { class: 'tw-dist' });
+  right.append(bBox);
+  breadthChart(bBox, {
+    points: bseries?.points ?? [],
+    prevPoints: bseries?.prevPoints ?? [],
+    prevDate: bseries?.prevDate ?? null,
+    height: 150,
+  });
+
+  sec.append(h('div', { class: 'pn-ov-2col' }, left, right));
   return sec;
 }
 
@@ -138,27 +179,25 @@ export async function renderOverview(ctx) {
   const box = ctx.body;
   mount(box, h('div', { class: 'tw-loading' }, h('span', { class: 'tw-spin' }), ' 加载中…'));
   const st = ctx.state;
-  const [breadth, zt, zb, dt, distData, turn, boardRank, watch, port] = await Promise.all([
+  const [breadth, zt, zb, dt, distData, turn, margin, bseries, boardRank, port] = await Promise.all([
     api.breadth().catch(() => null),
     api.limitPool('zt').catch(() => null),
     api.limitPool('zb').catch(() => null),
     api.limitPool('dt').catch(() => null),
     api.distribution().catch(() => null),
     api.turnover().catch(() => null),
+    api.margin().catch(() => null),
+    api.breadthSeries().catch(() => null),
     api.boards('industry', 'pct', 1, 8).catch(() => null),
-    api.watch.get().catch(() => null),
     api.portfolio.get().catch(() => null),
   ]);
   st.breadth = breadth;
-  st.watch = watch ?? st.watch;
   st.portfolio = port ?? st.portfolio;
-  const watchItems = liveItems(st.watch);
-  await Promise.all([hydrateIndustry(ctx, watchItems.map((i) => i.secid)), loadTrends(ctx, watchItems.map((i) => i.secid))]);
 
-  mount(box, h('div', { class: 'pn-sec' }, h('div', { class: 'pn-grid3' }, ...CORE_INDICES.slice(0, 3).map((i) => idxKpi(ctx, i))), h('div', { class: 'pn-grid3', style: { marginTop: '6px' } }, ...CORE_INDICES.slice(3, 6).map((i) => idxKpi(ctx, i)))));
+  mount(box);
 
-  // 涨跌分布（宏观）：涨跌趋势 + 成交量 + 全市场涨跌幅分布
-  box.append(distributionSection(ctx, { breadth, zt, zb, dt, dist: distData, turn }));
+  // 涨跌分布（宏观）：左栏 涨跌趋势 / 成交量 / 两融走势，右栏 涨跌幅分布 / 涨跌家数分时
+  box.append(distributionSection(ctx, { breadth, zt, zb, dt, dist: distData, turn, margin, bseries }));
 
   // 持仓汇总
   const v = port?.view;
@@ -201,16 +240,43 @@ export async function renderOverview(ctx) {
     );
   }
 
-  // 自选快照
-  if (watchItems.length > 0) {
-    box.append(
-      h('div', { class: 'pn-sec' },
-        secHeader('自选速览', h('button', { class: 'tw-btn xs', onclick: () => ctx.go('watch') }, '管理')),
-        h('div', { class: 'tw-list' }, ...watchItems.slice(0, 6).map((it) => watchRow(ctx, it))),
-      ),
-    );
-  }
+  // 大盘云图（原「大盘」页签内容，改为概览底部折叠区，默认收起不占首屏）
+  box.append(cloudSection(ctx));
+
   ctx.patchQuotes();
+}
+
+/** 大盘云图 · A股热力图（折叠，默认收起。若设置里把 cloudMapUrl 清空则整体隐藏） */
+function cloudSection(ctx) {
+  const st = ctx.state;
+  const url = st.prefs?.cloudMapUrl || 'https://52etf.site/';
+  const sec = h('div', { class: 'pn-sec' });
+  const body = h('div', { class: 'pn-fold-body', style: { display: 'none' } });
+  const caret = h('span', { class: 'arrow', style: { display: 'inline-block', transition: 'transform .15s' }, text: '▶' });
+  const head = h('div', { class: 'pn-fold-h' },
+    caret,
+    h('span', { class: 't', text: '大盘云图 · A股热力图' }),
+    h('span', { class: 'tw-hint', text: '面积=流通市值 · 颜色=涨跌幅' }),
+  );
+  let on = false;
+  let loaded = false;
+  head.onclick = () => {
+    on = !on;
+    caret.style.transform = on ? 'rotate(90deg)' : '';
+    body.style.display = on ? '' : 'none';
+    if (on && !loaded) {
+      loaded = true;
+      const iframe = h('iframe', { src: url, title: '大盘云图', sandbox: 'allow-scripts allow-same-origin allow-popups allow-forms', allow: 'clipboard-write' });
+      body.append(iframe);
+    }
+  };
+  sec.append(
+    head,
+    h('div', { class: 'tw-hint', style: { marginTop: '3px' } },
+      '热力图由 ', h('a', { href: url, target: '_blank', rel: 'noreferrer' }, url.replace(/^https?:\/\//, '').replace(/\/$/, '')), ' 提供，约 8 秒刷新；展开后滚轮缩放、双击看K线。'),
+    body,
+  );
+  return sec;
 }
 
 function boardMini(ctx, b) {
@@ -222,20 +288,7 @@ function boardMini(ctx, b) {
   );
 }
 
-function idxKpi(ctx, idx) {
-  const q = ctx.state.quotes[idx.secid];
-  const pc = pctClass(q?.pct, ctx.redUp);
-  return h(
-    'div',
-    { class: 'pn-kpi clickable', onclick: () => ctx.openDrawer(idx.secid) },
-    h('div', { class: 'l', text: idx.name }),
-    h('div', { class: `v ${pc}` }, ctx.registerQuote(idx.secid, 'pct', (v) => fmtPct(v), { colorize: true })),
-    h('div', { class: `tw-hint tw-num ${pc}` }, ctx.registerQuote(idx.secid, 'price', (v) => fmtPrice(v))),
-  );
-}
-
 /* ── 自选 ─────────────────────────────────────────────────────────────── */
-
 export async function renderWatch(ctx) {
   const st = ctx.state;
   if (!st.watch) st.watch = await api.watch.get();
@@ -648,67 +701,6 @@ async function showLedger(ctx) {
   ctx.openModal('全部流水（append-only 账本）', rows.length > 0 ? rows : [h('div', { class: 'tw-empty', text: '暂无流水' })]);
 }
 
-/* ── 大盘 ─────────────────────────────────────────────────────────────── */
-
-export async function renderMarket(ctx) {
-  const box = ctx.body;
-  mount(box);
-  const st = ctx.state;
-  const [breadth, zt, dt] = await Promise.all([api.breadth().catch(() => null), api.limitPool('zt').catch(() => null), api.limitPool('dt').catch(() => null)]);
-  st.breadth = breadth;
-
-  box.append(
-    h('div', { class: 'pn-sec' },
-      secHeader('核心指数'),
-      h('div', { class: 'pn-grid3' }, ...CORE_INDICES.map((i) => idxKpi(ctx, i))),
-    ),
-  );
-
-  box.append(
-    h('div', { class: 'pn-sec' },
-      secHeader('市场宽度', h('span', { class: 'tw-hint', text: breadth?.available ? '沪深两市' : '暂缺' })),
-      breadth?.available
-        ? h('div', { class: 'pn-breadth' },
-            h('div', { style: { flex: String(Math.max(1, breadth.up)), background: 'var(--tw-up-ink)' }, text: `上涨 ${breadth.up}` }),
-            h('div', { style: { flex: '0 0 30px', background: 'var(--tw-flat-ink)' }, text: String(breadth.even ?? 0) }),
-            h('div', { style: { flex: String(Math.max(1, breadth.down)), background: 'var(--tw-down-ink)' }, text: `下跌 ${breadth.down}` }),
-          )
-        : h('div', { class: 'tw-hint', text: '上游限流，稍后自动重试' }),
-      h('div', { class: 'pn-grid4', style: { marginTop: '7px' } },
-        kpi('涨停', String(zt?.total ?? '—'), 'tw-up'),
-        kpi('跌停', String(dt?.total ?? '—'), 'tw-down'),
-        kpi('两市成交额', fmtAmt(breadth?.amount ?? null)),
-        kpi('涨跌比', breadth?.available && breadth.down > 0 ? (breadth.up / breadth.down).toFixed(2) : '—'),
-      ),
-    ),
-  );
-
-  // 云图
-  const cloud = h('div', { class: 'pn-cloud', style: { marginTop: '6px' } });
-  const iframe = h('iframe', { src: st.prefs.cloudMapUrl || 'https://52etf.site/', title: '大盘云图', sandbox: 'allow-scripts allow-same-origin allow-popups allow-forms', allow: 'clipboard-write' });
-  let cloudOn = false;
-  const cloudBtn = h('button', { class: 'tw-btn xs', onclick: () => {
-    cloudOn = !cloudOn;
-    cloudBtn.textContent = cloudOn ? '收起云图' : '展开云图';
-    if (cloudOn) cloud.append(iframe); else iframe.remove();
-  } }, '展开云图');
-  box.append(
-    h('div', { class: 'pn-sec' },
-      secHeader('大盘云图 · A股热力图', h('span', { class: 'tw-hint', text: '面积=流通市值 · 颜色=涨跌幅' }), h('button', { class: 'tw-btn xs', onclick: () => window.open(st.prefs.cloudMapUrl, '_blank') }, '新窗口'), cloudBtn),
-      h('div', { class: 'tw-hint', text: '热力图由 52etf.site 提供，约 8 秒刷新；滚轮缩放、双击看K线。' }),
-      cloud,
-    ),
-  );
-
-  const searchWrap = h('div', { class: 'pn-sec' });
-  searchWrap.append(
-    secHeader('个股 / 基金 检索', h('button', { class: 'tw-btn xs primary', onclick: async () => { const p = await pickSymbol(ctx, '查询标的'); if (p) ctx.openDrawer(p.secid); } }, '搜索并查看')),
-    h('div', { class: 'tw-hint', text: '支持 A股 / 港股 / 美股 / ETF / 指数 / 期货主连，查看分时、多周期K线与资金流。' }),
-  );
-  box.append(searchWrap);
-  ctx.patchQuotes();
-}
-
 /* ── 板块 ─────────────────────────────────────────────────────────────── */
 
 export async function renderBoards(ctx) {
@@ -1071,17 +1063,17 @@ async function editAlertRule(ctx, a, isNew = false) {
 
 /* ── 工具 ─────────────────────────────────────────────────────────────── */
 
-function liveItems(w) {
+/** 生效中的自选标的（排除已归档分组） */
+export function liveItems(w) {
   if (!w) return [];
-  const archived = new Set(w.groups.filter((g) => g.archived).map((g) => g.id));
-  return w.items.filter((i) => !archived.has(i.groupId));
+  const archived = new Set((w.groups ?? []).filter((g) => g.archived).map((g) => g.id));
+  return (w.items ?? []).filter((i) => !archived.has(i.groupId));
 }
 
 export const VIEWS = {
   overview: renderOverview,
   watch: renderWatch,
   pos: renderPos,
-  market: renderMarket,
   boards: renderBoards,
   money: renderMoney,
   limit: renderLimit,

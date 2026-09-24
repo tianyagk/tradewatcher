@@ -743,6 +743,38 @@ textarea.tw-input {
   font-weight: 600;
 }
 
+/* 图表图例（两融 / 涨跌家数分时共用） */
+.tw-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--tw-ink-3);
+}
+.tw-legend-i {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.tw-legend .sw {
+  display: inline-block;
+  width: 10px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--tw-flat-ink);
+}
+.tw-legend .sw.up { background: var(--tw-up-ink); }
+.tw-legend .sw.down { background: var(--tw-down-ink); }
+.tw-legend .sw.line { background: var(--tw-accent); }
+.tw-legend .sw.dash {
+  background: none;
+  border-top: 2px dashed var(--tw-ink-3);
+  height: 0;
+}
+
 /* ── 灵动悬浮卡（行情条 hover 分时） ────────────────────────────────── */
 .tw-hovercard {
   position: fixed;

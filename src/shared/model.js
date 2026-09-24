@@ -137,6 +137,10 @@ export const DEFAULT_PREFS = {
   panelTab: 'overview',
   cloudMapUrl: 'https://52etf.site/',
   rescue: { enabled: true, universe: [] },
+  // 更新检查（关于页）
+  updateRepo: 'tianyagk/tradewatcher',   // <owner>/<repo>，可改成自己的仓库
+  autoUpdateCheck: true,                 // 每天自动检查一次
+  includePrerelease: false,              // 是否把 pre-release 视为新版本
 };
 
 /** 单条预警规则 */
@@ -186,6 +190,8 @@ export const KEYS = {
   kline: (secid, klt) => `tw:kline:${secid}:${klt}`,
   lkg: 'tw:lkg',
   meta: 'tw:meta',
+  update: 'tw:update',
+  breadthSeries: 'tw:bseries',
 };
 
 /** 生成短 id */

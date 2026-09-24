@@ -170,3 +170,41 @@ export function marketStatus(now = Date.now()) {
 export function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+/* ── 交易时段标尺 ──────────────────────────────────────────────────────── */
+
+const S_OPEN = 9 * 60 + 30;
+const S_LUNCH_S = 11 * 60 + 30;
+const S_LUNCH_E = 13 * 60;
+const S_CLOSE = 15 * 60;
+const S_TOTAL = S_LUNCH_S - S_OPEN + (S_CLOSE - S_LUNCH_E);   // 240 分钟
+
+/**
+ * 时间戳 → 交易时段进度 0..1（**午休与隔夜折叠**）。
+ * 用于把 09:30–11:30 / 13:00–15:00 的采样点均匀铺在一条轴上，
+ * 否则中午 90 分钟的空档会在图上留下一段无意义的水平直线。
+ */
+export function sessionPos(ts) {
+  const d = new Date(ts);
+  const m = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
+  if (m <= S_OPEN) return 0;
+  if (m >= S_CLOSE) return 1;
+  if (m <= S_LUNCH_S) return (m - S_OPEN) / S_TOTAL;
+  if (m < S_LUNCH_E) return (S_LUNCH_S - S_OPEN) / S_TOTAL;
+  return (S_LUNCH_S - S_OPEN + (m - S_LUNCH_E)) / S_TOTAL;
+}
+
+/** 进度 0..1 → "HH:MM"（sessionPos 的逆映射，用于画时间轴刻度） */
+export function sessionLabel(pos) {
+  const m = Math.round(Math.max(0, Math.min(1, pos)) * S_TOTAL) + S_OPEN;
+  const real = m <= S_LUNCH_S ? m : m + (S_LUNCH_E - S_LUNCH_S);
+  const h = Math.floor(real / 60);
+  const mm = Math.round(real % 60);
+  return `${String(h).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+}
+
+/** 是否处于（或刚过）可采样的时段：09:30–11:30 / 13:00–15:05 */
+export function inSamplingWindow(now = Date.now()) {
+  const st = marketStatus(now);
+  return st.open || st.hint === '盘后';
+}
