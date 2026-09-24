@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tradewatcher</title>
+    <link rel="stylesheet" href="../ui/base.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="tw-popup">
+    <header class="pp-head">
+      <div class="pp-brand">
+        <span class="pp-dot"></span>
+        <span class="pp-title">tradewatcher</span>
+        <span id="market" class="tw-chip">—</span>
+      </div>
+      <div class="pp-head-actions">
+        <span id="clock" class="tw-hint tw-num">--:--:--</span>
+        <button id="btn-refresh" class="tw-icon-btn" title="立即刷新">⟳</button>
+        <button id="btn-panel" class="tw-icon-btn" title="打开侧边栏盯盘面板">▤</button>
+        <button id="btn-settings" class="tw-icon-btn" title="设置">⚙</button>
+      </div>
+    </header>
+
+    <section class="pp-strip" id="strip"></section>
+
+    <nav class="tw-tabs pp-tabs" id="tabs"></nav>
+
+    <main class="pp-body tw-scroll" id="body">
+      <div class="tw-loading"><span class="tw-spin"></span> 加载行情…</div>
+    </main>
+
+    <footer class="pp-foot">
+      <span id="status" class="tw-hint">延迟行情 · 仅供盯盘参考</span>
+      <span class="tw-flex tw-gap6">
+        <button id="btn-cloud" class="tw-btn xs">云图</button>
+        <button id="btn-full" class="tw-btn xs">完整面板</button>
+      </span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

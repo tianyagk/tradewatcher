@@ -1,0 +1,56 @@
+# ── 操作系统 ────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── 编辑器 / IDE ────────────────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ── 日志与临时文件 ──────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-error.log*
+*.tmp
+*.temp
+*.bak
+.cache/
+.tmp/
+
+# ── Node（当前无构建链，预留） ──────────────────────────────────────────
+node_modules/
+.pnpm-store/
+
+# ── Python（tools/make_icons.py 等） ────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── 扩展打包产物（不要提交 crx / pem，私钥泄露会导致签名被冒用） ────────
+*.crx
+*.pem
+*.zip
+dist/
+build/
+release/
+
+# ── 本地私有配置与参考仓库 ──────────────────────────────────────────────
+.env
+.env.*
+*.local
+_ref/
+
+# ── 工具目录（WorkBuddy 项目数据，不纳入版本控制） ──────────────────────
+.workbuddy/

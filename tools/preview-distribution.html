@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>涨跌分布模块 · 视觉验证</title>
+<!--
+  涨跌分布模块的独立预览页（开发工具，不随扩展打包）。
+  用真实成交额快照 + 仿真全市场分档数据，直接在浏览器中验证：
+    · distributionSection 的完整排版（涨跌趋势 / 成交量 / 涨跌幅分布）
+    · distributionChart 的 SVG 渲染（柱高、刻度、档位标签、占比、颜色随 redUp 反转）
+    · 深浅主题下 palette() 的取色
+  用法：由仓库根目录起一个静态服务，浏览器打开 /tools/preview-distribution.html
+-->
+<link rel="stylesheet" href="../src/ui/base.css">
+<link rel="stylesheet" href="../src/sidepanel/panel.css">
+<style>
+  html, body { height: auto; overflow: auto; }
+  body { margin: 0; padding: 18px 16px 40px; background: var(--tw-bg); }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .cols { display: grid; grid-template-columns: minmax(320px, 400px) 1fr; gap: 18px; align-items: start; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  .card { border: 1px solid var(--tw-border); border-radius: 10px; background: var(--tw-panel); overflow: hidden; }
+  .card > h2 { margin: 0; padding: 10px 12px; font-size: 12.5px; font-weight: 600;
+               border-bottom: 1px solid var(--tw-border); background: var(--tw-panel-2); color: var(--tw-ink-2); }
+  .card > .bd { padding: 10px 12px 14px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 16px;
+         padding: 10px 12px; border: 1px solid var(--tw-border); border-radius: 10px;
+         background: var(--tw-panel); font-size: 12px; color: var(--tw-ink-2); }
+  .bar label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  .bar button { font: inherit; padding: 4px 11px; border-radius: 6px; cursor: pointer;
+                border: 1px solid var(--tw-border); background: var(--tw-panel-2); color: var(--tw-ink); }
+  .bar button:hover { border-color: var(--tw-accent); color: var(--tw-accent); }
+  .bar code { font-family: var(--tw-mono); font-size: 11px; color: var(--tw-ink-3); }
+  .wide { grid-column: 1 / -1; }
+  .svgbox { width: 760px; max-width: 100%; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <strong style="color:var(--tw-ink)">涨跌分布模块 · 视觉验证</strong>
+    <label><input type="checkbox" id="redUp" checked> 红涨绿跌（redUp）</label>
+    <button id="btnTheme">切换深/浅主题</button>
+    <button id="btnDegrade">降级态：无分布数据</button>
+    <button id="btnEmpty">空数据</button>
+    <code id="themeTag">theme=light</code>
+  </div>
+
+  <div class="cols">
+    <!-- 侧栏宽度（360px）下的真实观感 -->
+    <div class="card">
+      <h2>侧边栏实宽 360px · distributionSection 全量</h2>
+      <div class="bd"><div id="main360" style="width:336px"></div></div>
+    </div>
+
+    <!-- 分布图单独放大 -->
+    <div class="card">
+      <h2>分布图单独渲染 · distributionChart</h2>
+      <div class="bd">
+        <div class="svgbox" id="chartOnly"></div>
+        <div class="svgbox" id="chartFlip" style="margin-top:18px"></div>
+      </div>
+    </div>
+
+    <!-- 边界：极端分布 / 单档 / 全平盘 -->
+    <div class="card wide">
+      <h2>边界用例（左：极端偏态 · 中：全平盘 · 右：单档）</h2>
+      <div class="bd" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+        <div id="edgeSkew"></div>
+        <div id="edgeFlat"></div>
+        <div id="edgeOne"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { distributionSection } from '../src/sidepanel/views.js';
+import { distributionChart } from '../src/ui/charts.js';
+
+/* ── 真实快照：腾讯 day/query 末条累计成交额（2026-09-24 收盘） ─────────── */
+const TURN = {
+  date: '20260924',
+  today: 1653357362390.0898,
+  prev: 1764976416029.21,
+  prevDate: '20260923',
+  change: -111619053639.12012,
+  changePct: -6.324110204839862,
+  progress: 1,
+  series: [
+    { date: '20260918', amount: 2077100296507.43 },
+    { date: '20260921', amount: 2031513488518.92 },
+    { date: '20260922', amount: 2135550410280.32 },
+    { date: '20260923', amount: 1764976416029.21 },
+    { date: '20260924', amount: 1653357362390.0898 },
+  ],
+};
+
+/* ── 仿真全市场分档（5353 只，涨 2588 / 平 121 / 跌 2644） ─────────────── */
+const DIST = {
+  total: 5353, expected: 5353, up: 2588, flat: 121, down: 2644, source: 'eastmoney',
+  bins: [
+    { key: 'u10', label: '≥10%', side: 'up',   count: 62 },
+    { key: 'u7',  label: '7~10', side: 'up',   count: 41 },
+    { key: 'u5',  label: '5~7',  side: 'up',   count: 88 },
+    { key: 'u3',  label: '3~5',  side: 'up',   count: 214 },
+    { key: 'u0',  label: '0~3',  side: 'up',   count: 2183 },
+    { key: 'f0',  label: '平盘', side: 'flat', count: 121 },
+    { key: 'd0',  label: '0~3',  side: 'down', count: 2174 },
+    { key: 'd3',  label: '3~5',  side: 'down', count: 312 },
+    { key: 'd5',  label: '5~7',  side: 'down', count: 96 },
+    { key: 'd7',  label: '7~10', side: 'down', count: 44 },
+    { key: 'd10', label: '≥10%', side: 'down', count: 18 },
+  ],
+};
+
+const BREADTH = { available: true, up: 2588, even: 121, down: 2644 };
+const ZT = { total: 62 };
+const ZB = { total: 24 };
+const DT = { total: 18 };
+
+/* 降级态：无分布数据（本机 push2 被限流时的真实表现） */
+const DIST_NULL = null;
+
+const ctxOf = (redUp) => ({ redUp, state: { quotes: {}, prefs: {} } });
+
+const el = (id) => document.getElementById(id);
+const fill = (id, ctx, opts) => {
+  const box = el(id);
+  box.textContent = '';
+  box.append(distributionSection(ctx, opts));
+};
+
+function renderAll() {
+  const redUp = el('redUp').checked;
+  const ctx = ctxOf(redUp);
+
+  fill('main360', ctx, { breadth: BREADTH, zt: ZT, zb: ZB, dt: DT, dist: DIST, turn: TURN });
+
+  const c1 = el('chartOnly'); c1.textContent = '';
+  distributionChart(c1, { bins: DIST.bins, redUp, height: 158 });
+
+  const c2 = el('chartFlip'); c2.textContent = '';
+  distributionChart(c2, { bins: DIST.bins, redUp: !redUp, height: 158 });
+
+  const e1 = el('edgeSkew'); e1.textContent = '';
+  distributionChart(e1, { bins: [
+    { label: '≥10%', side: 'up', count: 3 }, { label: '7~10', side: 'up', count: 0 },
+    { label: '5~7', side: 'up', count: 6 }, { label: '3~5', side: 'up', count: 12 },
+    { label: '0~3', side: 'up', count: 4902 }, { label: '平盘', side: 'flat', count: 2 },
+    { label: '0~3', side: 'down', count: 9 }, { label: '3~5', side: 'down', count: 0 },
+    { label: '5~7', side: 'down', count: 0 }, { label: '7~10', side: 'down', count: 0 },
+    { label: '≥10%', side: 'down', count: 0 },
+  ], redUp, height: 140 });
+
+  const e2 = el('edgeFlat'); e2.textContent = '';
+  distributionChart(e2, { bins: DIST.bins.map((b) => ({ ...b, count: 0 })).map((b) => (b.side === 'flat' ? { ...b, count: 42 } : b)), redUp, height: 140 });
+
+  const e3 = el('edgeOne'); e3.textContent = '';
+  distributionChart(e3, { bins: [{ label: '0~3', side: 'up', count: 7 }], redUp, height: 140 });
+}
+
+/* ── 交互 ─────────────────────────────────────────────────────────────── */
+el('redUp').addEventListener('change', renderAll);
+
+el('btnTheme').addEventListener('click', () => {
+  const root = document.documentElement;
+  const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  root.dataset.theme = next;
+  el('themeTag').textContent = `theme=${next}`;
+  renderAll();
+});
+
+let degraded = false;
+el('btnDegrade').addEventListener('click', () => {
+  degraded = !degraded;
+  el('btnDegrade').textContent = degraded ? '恢复：带分布数据' : '降级态：无分布数据';
+  const box = el('main360');
+  box.textContent = '';
+  box.append(distributionSection(ctxOf(el('redUp').checked), {
+    breadth: BREADTH, zt: ZT, zb: ZB, dt: DT, dist: degraded ? DIST_NULL : DIST, turn: TURN,
+  }));
+});
+
+el('btnEmpty').addEventListener('click', () => {
+  const box = el('main360');
+  box.textContent = '';
+  box.append(distributionSection(ctxOf(el('redUp').checked), { turn: null }));
+});
+
+renderAll();
+</script>
+</body>
+</html>

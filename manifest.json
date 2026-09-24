@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "tradewatcher · 综合盯盘助手",
+  "version": "1.1.0",
+  "description": "综合盯盘工具：A股/港股/美股/ETF/指数/期货/商品 实时延迟行情、自选分组、流水驱动的持仓账本、多周期K线、板块资金流、涨跌停复盘、财经日历与价格预警。免费公开数据源，延迟行情，仅供盯盘参考。",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "alarms",
+    "notifications",
+    "sidePanel",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "https://*.eastmoney.com/*",
+    "https://*.sina.com.cn/*",
+    "https://*.sina.cn/*",
+    "https://*.qq.com/*",
+    "https://*.gtimg.cn/*",
+    "https://52etf.site/*"
+  ],
+  "background": {
+    "service_worker": "src/bg/worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "tradewatcher · 综合盯盘",
+    "default_popup": "src/popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/panel.html"
+  },
+  "options_page": "src/options/options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "打开 tradewatcher 弹窗"
+    }
+  }
+}

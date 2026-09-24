@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tradewatcher · 综合盯盘面板</title>
+    <link rel="stylesheet" href="../ui/base.css" />
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body class="pn-body">
+    <div class="pn-root">
+      <header class="pn-head">
+        <div class="pn-brand">
+          <span class="pn-dot"></span>
+          <span class="pn-title">tradewatcher</span>
+          <span id="market" class="tw-chip">—</span>
+        </div>
+        <div class="pn-head-actions">
+          <span id="clock" class="tw-hint tw-num">--:--:--</span>
+          <button id="btn-refresh" class="tw-icon-btn" title="立即刷新">⟳</button>
+          <button id="btn-mask" class="tw-icon-btn" title="极简/隐蔽模式">◐</button>
+          <button id="btn-theme" class="tw-icon-btn" title="切换主题">◑</button>
+          <button id="btn-tab" class="tw-icon-btn" title="在新标签页打开">⤢</button>
+          <button id="btn-settings" class="tw-icon-btn" title="设置">⚙</button>
+        </div>
+      </header>
+
+      <section class="pn-strips" id="strips"></section>
+
+      <nav class="tw-tabs" id="tabs"></nav>
+
+      <main class="pn-main tw-scroll" id="body">
+        <div class="tw-loading"><span class="tw-spin"></span> 正在连接行情源…</div>
+      </main>
+
+      <footer class="pn-foot">
+        <span id="status" class="tw-hint">延迟行情（非 L2）· 免费公开数据源 · 不构成投资建议</span>
+        <span id="countdown" class="tw-hint tw-num"></span>
+      </footer>
+    </div>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
