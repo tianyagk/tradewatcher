@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "tradewatcher · 综合盯盘助手",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "综合盯盘工具：A股/港股/美股/ETF/指数/期货/商品 实时延迟行情、自选分组、流水驱动的持仓账本、多周期K线、板块资金流、涨跌停复盘、财经日历与价格预警。免费公开数据源，延迟行情，仅供盯盘参考。",
   "minimum_chrome_version": "114",
   "permissions": [

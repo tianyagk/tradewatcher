@@ -181,7 +181,23 @@ export async function fetchLatest(repo, { includePrerelease = false } = {}) {
     zipUrl: `https://github.com/${full}/archive/refs/heads/${branch}.zip`,
     prerelease: false,
     ref: branch,
+    // 没有 tag ≠ 没有版本号：本项目的版本写在 manifest.json 里。
+    // 读一次远端 manifest，就能让「是否已是最新」的判断继续成立 ——
+    // 否则仓库不打 tag 时界面只能一直显示「无法比较版本」，等于没法用。
+    version: await versionFromManifest(full, branch),
   };
+}
+
+/** 从远端 manifest.json 读 version；拿不到就返回 null（不抛错，不影响主流程） */
+async function versionFromManifest(repo, ref) {
+  try {
+    const bytes = await fetchRemoteFile(repo, ref, 'manifest.json');
+    const parsed = JSON.parse(new TextDecoder().decode(bytes));
+    const v = parsed?.version;
+    return typeof v === 'string' && looksLikeVersion(v) ? v : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -193,8 +209,10 @@ export async function checkForUpdate({ repo = DEFAULT_REPO, currentVersion, incl
   const base = { checkedAt: Date.now(), repo: normalizeRepo(repo) ?? String(repo), current };
   try {
     const latest = await fetchLatest(repo, { includePrerelease });
-    const version = latest.tag ?? null;
-    const hasUpdate = version !== null && looksLikeVersion(version) ? compareVersion(version, current) > 0 : false;
+    // 版本号优先级：tag / Release（即发布身份）→ 远端 manifest.json（无 tag 时的兜底）
+    const tagVersion = looksLikeVersion(latest.tag) ? latest.tag : null;
+    const version = tagVersion ?? latest.version ?? null;
+    const hasUpdate = version !== null ? compareVersion(version, current) > 0 : false;
     return {
       ...base,
       ok: true,
@@ -202,8 +220,8 @@ export async function checkForUpdate({ repo = DEFAULT_REPO, currentVersion, incl
       ...latest,
       version,
       hasUpdate,
-      // 没有可比版本号（仓库无 tag）时无法判断新旧，前端应提示「以提交为准」
-      comparable: version !== null && looksLikeVersion(version),
+      // 没有可比版本号（既无 tag，也读不到远端 manifest 版本）时无法判断新旧
+      comparable: version !== null,
     };
   } catch (error) {
     return {

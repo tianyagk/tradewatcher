@@ -390,17 +390,19 @@ async function updateCard() {
         badge,
         h('span', { style: { fontSize: '13px' } }, `当前 v${l.current}`),
         h('span', { class: 'tw-hint' }, '→'),
-        h('span', { style: { fontSize: '13px', fontWeight: '600' } }, l.latestName || l.tag || '未知'),
+        // 有可比版本号时优先显示版本；无 tag 的仓库退到 name（「分支 @ 短 SHA」），
+        // 它才是唯一在所有分支（release/tag/commit）都会被赋值的标识字段。
+        h('span', { style: { fontSize: '13px', fontWeight: '600' } }, l.version ? `v${l.version}` : l.tag || l.name || '未知'),
       ),
       h('div', { class: 'tw-hint', style: { marginTop: '4px' } },
-        `来源：${sourceLabel(l.source)} · 检查于 ${fmtTime(l.checkedAt)}`),
+        `来源：${sourceLabel(l.source)}${l.source === 'commit' && l.name ? `（${l.name}）` : ''} · 检查于 ${fmtTime(l.checkedAt)}`),
     );
     if (l.comparable && !l.hasUpdate) {
       status.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' } }, '本机版本不低于远端，无需更新。'));
     }
     if (!l.comparable) {
       status.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' } },
-        '远端没有可解析的版本号（仓库未打 tag），无法判断新旧；可点「下载更新包」自行比对。'));
+        '远端既没有 tag / Release，也没能从远端 manifest.json 读到版本号，无法判断新旧；可点「下载更新包」自行比对。'));
     }
     const notes = renderNotes(l.notes);
     if (notes) {
