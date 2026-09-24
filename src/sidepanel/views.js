@@ -89,7 +89,9 @@ export function distributionSection(ctx, { breadth, zt, zb, dt, dist, turn, marg
   const sec = h('div', { class: 'pn-sec pn-ov' });
   sec.append(secHeader(
     '涨跌分布',
-    h('span', { class: 'tw-hint', text: dist ? `全市场 ${fmtInt(dist.total)} 只` : breadth?.available ? '沪深两市' : '涨跌家数暂缺' }),
+    h('span', { class: 'tw-hint', text: dist
+      ? `全市场 ${fmtInt(dist.total)} 只${dist.source === 'sina' ? ' · 新浪兜底' : ''}`
+      : breadth?.available ? '沪深两市' : '涨跌家数暂缺' }),
   ));
 
   const left = h('div', { class: 'pn-ov-col' });
@@ -154,7 +156,7 @@ export function distributionSection(ctx, { breadth, zt, zb, dt, dist, turn, marg
     right.append(chartBox);
     distributionChart(chartBox, { bins: dist.bins, redUp: ctx.redUp, height: 150 });
   } else {
-    right.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' }, text: '涨跌幅分布需要全市场快照，上游繁忙时自动跳过。' }));
+    right.append(h('div', { class: 'tw-hint', style: { marginTop: '4px' }, text: '涨跌幅分布需要全市场快照：东财 push2 与新浪兜底都未取到时才会跳过，稍后自动重试。' }));
   }
 
   /* ── 右栏 ②：上涨下跌家数分时 ── */
@@ -251,7 +253,9 @@ function cloudSection(ctx) {
   const st = ctx.state;
   const url = st.prefs?.cloudMapUrl || 'https://52etf.site/';
   const sec = h('div', { class: 'pn-sec' });
-  const body = h('div', { class: 'pn-fold-body', style: { display: 'none' } });
+  // pn-cloud 是必须的：.pn-cloud iframe 那条样式控制宽高，漏了这个类 iframe 会退回
+  // 浏览器默认的 300×150，外部站点按桌面布局渲染再被压进小框 → 内容互相叠压。
+  const body = h('div', { class: 'pn-fold-body pn-cloud', style: { display: 'none' } });
   const caret = h('span', { class: 'arrow', style: { display: 'inline-block', transition: 'transform .15s' }, text: '▶' });
   const head = h('div', { class: 'pn-fold-h' },
     caret,

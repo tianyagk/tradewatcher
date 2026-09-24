@@ -1492,7 +1492,27 @@ export async function fetchBreadth() {
       }
       amount += r.amount ?? 0;
     }
-    return { up: ok ? up : null, down: ok ? down : null, even: ok ? even : null, amount, available: ok };
+    if (ok) return { up, down, even, amount, available: true, source: 'eastmoney' };
+
+    // 廉价路径失效（push2 的 f104/f105/f106 拿不到）→ 复用同一份新浪全市场快照。
+    // 快照本身有 240s TTL，所以这里 15s 的调用节奏不会放大成请求风暴。
+    const snap = await sinaMarketSnapshot().catch(() => null);
+    if (snap !== null) {
+      let sUp = 0;
+      let sDown = 0;
+      let sEven = 0;
+      let sAmount = 0;
+      for (const r of snap.rows) {
+        if (r.pct > 0) sUp += 1;
+        else if (r.pct < 0) sDown += 1;
+        else sEven += 1;
+        sAmount += r.amount ?? 0;
+      }
+      noteSource('sina');
+      // 成交额优先用两市指数口径（官方值），拿不到才退回逐股求和
+      return { up: sUp, down: sDown, even: sEven, amount: amount > 0 ? amount : sAmount, available: true, source: 'sina' };
+    }
+    return { up: null, down: null, even: null, amount, available: false, source: null };
   });
 }
 
@@ -1540,50 +1560,163 @@ export function bucketIndex(pct) {
  * 全市场涨跌分布：逐页拉 A 股涨跌幅后本地分档。
  * 12 页 × 500 条 ≈ 全市场 5500 只；TTL 3 分钟，避免把上游打爆。
  */
+/* ─────────────── 全市场快照（新浪兜底源）───────────────────────────────
+ * 为什么必须有这条兜底：`push2*` 的 `/api/**` 可能在网络层被整族阻断
+ * （curl 根路径 404 说明主机活着，但任意 /api/ 路径立即 RST、返回 000）。
+ * 一旦如此，「全市场涨跌幅分布」与「涨跌家数」会同时失效 —— 概览右栏
+ * 两张图只剩占位文案。新浪行情中心返回逐股 changepercent / amount，
+ * 可分页取全量，正好补上这个缺口。
+ *
+ * ⚠️ 单页上限 **100 条**（num 传 500/2000 也只回 100），全 A ~5500 只
+ *     → 约 56 次请求；实测 8 并发约 2.3s、0 失败页、相邻页无重叠。
+ *     因此**必须**由 TTL 缓存兜住：否则 15s TTL 的 fetchBreadth 会把它
+ *     变成每小时上千次请求，很快被新浪限流。
+ */
+const SINA_NODE_ALL_A = 'hs_a';
+const SINA_SNAP_TTL = 240000;
+const SINA_PAGE_SIZE = 100;
+const SINA_CONC = 8;
+
+/** 上次全市场快照成功用的是新浪（而非东财）时，在此时间戳前优先新浪 */
+let preferSinaUntil = 0;
+
+async function sinaMarketSnapshot() {
+  return ttlCache('sina-snap', SINA_SNAP_TTL, async () => {
+    const api = '/quotes_service/api/json_v2.php/Market_Center.getHQNode';
+    let total = null;
+    try {
+      const t = await fetchText(`https://${SINA_FLOW_HOST}${api}StockCount?node=${SINA_NODE_ALL_A}`, {
+        referer: SINA_REFERER,
+        timeoutMs: 9000,
+      });
+      total = num(JSON.parse(t));
+    } catch {
+      total = null;
+    }
+    if (total === null || total <= 0) return null;
+
+    const pages = Math.ceil(total / SINA_PAGE_SIZE);
+    const rows = [];
+    let failed = 0;
+    await poolRun(
+      Array.from({ length: pages }, (_, i) => i + 1),
+      SINA_CONC,
+      async (p) => {
+        try {
+          const text = await fetchText(
+            `https://${SINA_FLOW_HOST}${api}Data?page=${p}&num=${SINA_PAGE_SIZE}&sort=changepercent&asc=0&node=${SINA_NODE_ALL_A}`,
+            { referer: SINA_REFERER, timeoutMs: 12000 },
+          );
+          const arr = JSON.parse(text);
+          if (!Array.isArray(arr)) {
+            failed += 1;
+            return;
+          }
+          for (const it of arr) {
+            const pct = num(it.changepercent);
+            if (pct === null) continue;
+            rows.push({ code: String(it.code ?? ''), name: String(it.name ?? ''), pct, amount: num(it.amount) });
+          }
+        } catch {
+          failed += 1;
+        }
+      },
+    );
+    // 残缺快照比没有更糟（会把分档和家数一起做偏），失败页超阈值就整体放弃
+    if (failed > Math.max(2, Math.floor(pages * 0.08))) return null;
+    if (rows.length < total * 0.9) return null;
+    return { total: rows.length, rows };
+  });
+}
+
+/** 按 11 档口径统计一组涨跌幅 */
+function bucketCounts(pcts) {
+  const counts = new Array(DIST_BUCKETS.length).fill(0);
+  let up = 0;
+  let down = 0;
+  let flat = 0;
+  for (const p of pcts) {
+    const i = bucketIndex(p);
+    if (i >= 0) counts[i] += 1;
+    if (p > 0) up += 1;
+    else if (p < 0) down += 1;
+    else flat += 1;
+  }
+  return {
+    up,
+    down,
+    flat,
+    bins: DIST_BUCKETS.map((b, i) => ({ key: b.key, label: b.label, side: b.side, count: counts[i] })),
+  };
+}
+
+/** 东财 push2 clist 全 A 快照（14 页） */
+async function distributionFromEastmoney() {
+  const pcts = [];
+  let expected = null;
+  const pageSize = 500;
+  for (let pn = 1; pn <= 14; pn += 1) {
+    const q = `pn=${pn}&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(ALL_A_FS)}&fields=f3`;
+    let json = null;
+    try {
+      json = await fetchAny(QUOTE_HOSTS, `/api/qt/clist/get?${q}`, 9000, 15000);
+    } catch {
+      json = null;
+    }
+    const list = diffList(json);
+    if (list.length === 0) break;
+    if (expected === null) expected = num(dataOf(json)?.total) ?? null;
+    for (const it of list) {
+      const p = num(it.f3);
+      if (p !== null) pcts.push(p);
+    }
+    if (list.length < pageSize) break;
+    if (expected !== null && pcts.length >= expected) break;
+  }
+  if (pcts.length === 0) return null;
+  return { total: pcts.length, expected, ...bucketCounts(pcts), source: 'eastmoney' };
+}
+
+/** 新浪全市场快照 → 同样口径 */
+async function distributionFromSina() {
+  const snap = await sinaMarketSnapshot();
+  if (snap === null) return null;
+  return { total: snap.total, expected: snap.total, ...bucketCounts(snap.rows.map((r) => r.pct)), source: 'sina' };
+}
+
+/** 东财 / 新浪对冲取全市场快照
+ *
+ * 直接「东财失败再走新浪」会串行叠加：东财被阻断时它内部的 3 主机 × 3 轮重试
+ * 要耗掉约 3.6s，之后才开始跑新浪，首屏要等 ~7s。
+ * 这里让新浪**延迟启动**（hedge）：东财 1.2s 内成功就取消新浪，一个多余请求都不发；
+ * 东财挂掉时新浪早已并行跑完，总耗时 ≈ 东财的失败耗时而不是两者之和。
+ */
+async function distributionHedged() {
+  let cancelled = false;
+  const emP = distributionFromEastmoney().catch(() => null);
+  const sinaP = (async () => {
+    await sleep(1200);
+    if (cancelled) return null;
+    return distributionFromSina().catch(() => null);
+  })();
+  const em = await emP;
+  if (em !== null) {
+    cancelled = true;
+    return em;
+  }
+  return sinaP;
+}
+
+/** 全市场涨跌幅分档：东财优先，被阻断时自动降级到新浪 */
 export async function fetchDistribution() {
   return ttlCache('dist', 180000, async () => {
-    const pcts = [];
-    let expected = null;
-    const pageSize = 500;
-    for (let pn = 1; pn <= 14; pn += 1) {
-      const q = `pn=${pn}&pz=${pageSize}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=${encodeURIComponent(ALL_A_FS)}&fields=f3`;
-      let json = null;
-      try {
-        json = await fetchAny(QUOTE_HOSTS, `/api/qt/clist/get?${q}`, 9000, 15000);
-      } catch {
-        json = null;
-      }
-      const list = diffList(json);
-      if (list.length === 0) break;
-      if (expected === null) expected = num(dataOf(json)?.total) ?? null;
-      for (const it of list) {
-        const p = num(it.f3);
-        if (p !== null) pcts.push(p);
-      }
-      if (list.length < pageSize) break;
-      if (expected !== null && pcts.length >= expected) break;
-    }
-    if (pcts.length === 0) return null;
-    const counts = new Array(DIST_BUCKETS.length).fill(0);
-    let up = 0;
-    let down = 0;
-    let flat = 0;
-    for (const p of pcts) {
-      const i = bucketIndex(p);
-      if (i >= 0) counts[i] += 1;
-      if (p > 0) up += 1;
-      else if (p < 0) down += 1;
-      else flat += 1;
-    }
-    return {
-      total: pcts.length,
-      expected,
-      up,
-      down,
-      flat,
-      bins: DIST_BUCKETS.map((b, i) => ({ key: b.key, label: b.label, side: b.side, count: counts[i] })),
-      source: 'eastmoney',
-    };
+    // 已知东财不可用时直接走新浪，省掉那 1.2s 对冲窗口
+    const got = Date.now() < preferSinaUntil ? await distributionFromSina().catch(() => null) : await distributionHedged();
+    if (got === null) return null;
+    noteSource(got.source);
+    // 新浪成功 → 10 分钟内优先新浪；东财恢复 → 立刻切回东财并清掉偏好
+    preferSinaUntil = got.source === 'sina' ? Date.now() + 600000 : 0;
+    return got;
   });
 }
 
@@ -1770,7 +1903,8 @@ export async function sampleBreadthSeries(now = Date.now()) {
     up = b.up;
     down = b.down;
     flat = b.even;
-    source = 'index';
+    // 记下真实来源：东财指数统计字段 vs 新浪全市场快照兜底
+    source = b.source === 'sina' ? 'sina' : 'index';
   } else if (now >= distSkipUntil && now - lastDistSampleAt >= DIST_MIN_GAP) {
     lastDistSampleAt = now;
     const dist = await fetchDistribution().catch(() => null);

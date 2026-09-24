@@ -319,6 +319,7 @@ function renderNotes(md) {
 }
 
 async function updateCard() {
+  const m = chrome.runtime.getManifest();
   const card = h('div', { class: 'op-card' });
   card.append(h('h3', { text: '版本与更新' }));
 
@@ -560,7 +561,7 @@ function dataSourceCard() {
         tr('历史 K 线', '腾讯 fqkline（东财 push2his 兜底，本地缓存 + 增量更新）'),
         tr('标的搜索', '东方财富 searchapi suggest'),
         tr('涨跌停 / 炸板池', '东方财富 push2ex'),
-        tr('全市场涨跌幅分布', '东方财富 push2 clist 全 A 快照自行分档'),
+        tr('全市场涨跌幅分布 / 涨跌家数', '东方财富 push2 clist 全 A 快照自行分档（新浪行情中心兜底）'),
         tr('两市成交额', '腾讯 day/query 末条累计成交额（不依赖 push2）'),
         tr('财经日历', '东方财富数据中心（新股申购、财报预约披露、分红除权）'),
         tr('大盘云图', '52etf.site 内嵌 iframe'),
@@ -618,8 +619,18 @@ function render() {
   const head = { appearance: ['外观与刷新', '调整主题、配色、隐私模式与刷新节奏'], alerts: ['价格预警', '设置价格 / 涨跌幅提醒，触发后推送系统通知'], data: ['数据管理', '导出、导入与重置本地数据'], about: ['关于', '版本检查与更新、数据源与免责声明'] }[state.section];
   mount(main, h('h2', { class: 'op-h', text: head[0] }), h('div', { class: 'op-sub', text: head[1] }));
   const content = map[state.section]();
-  if (content instanceof Promise) content.then((node) => main.append(node));
-  else main.append(content);
+  // 注意：这里必须 catch。async 段一旦抛错，裸 .then() 会把异常吞成 rejected promise，
+  // 页面只剩标题、正文一片空白且控制台无任何提示（曾因此在「关于」页排查了很久）。
+  if (content instanceof Promise) {
+    content.then((node) => main.append(node)).catch((error) => {
+      main.append(
+        h('div', { class: 'op-card' },
+          h('h3', { text: '本页渲染失败' }),
+          h('div', { class: 'tw-hint', text: String(error?.message ?? error) }),
+        ),
+      );
+    });
+  } else main.append(content);
 }
 
 async function boot(silent = false) {

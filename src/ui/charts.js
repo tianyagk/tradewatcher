@@ -808,7 +808,7 @@ export function breadthChart(container, { points = [], prevPoints = [], prevDate
   if (pts.length < 2) {
     container.append(
       h('div', { class: 'tw-empty', style: { padding: '16px 0', fontSize: '11px' } },
-        prev.length > 1 ? `今日采样累积中（已 ${pts.length} 点）· 下方虚线为 ${prevDate ?? '上一交易日'} 对照` : '上涨/下跌家数分时累积中：免费源没有历史端点，面板打开期间每分钟采样一次、约 3 分钟出一个点（需东财行情主机可用）。'),
+        prev.length > 1 ? `今日采样累积中（已 ${pts.length} 点）· 下方虚线为 ${prevDate ?? '上一交易日'} 对照` : '上涨/下跌家数分时累积中：免费源没有日内历史端点，只能自己采样 —— 盘中每约 3 分钟落一个点，累积 2 个点后开始出图（需在交易时段内保持扩展运行）。'),
     );
     // 只有昨日数据时也画出来，至少不是空白
     if (prev.length > 1) withWidth(container, 640, draw);

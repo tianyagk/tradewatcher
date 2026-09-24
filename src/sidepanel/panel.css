@@ -444,8 +444,11 @@ body.pn-body {
 /* ── 云图 ── */
 .pn-cloud iframe {
   width: 100%;
-  height: 460px;
+  /* 高度要够：外部热力图按桌面布局渲染，太矮会挤成一团。
+     用 vh 跟随面板高度，短窗口不溢出、高窗口不浪费。 */
+  height: clamp(360px, 56vh, 620px);
   border: none;
+  border-radius: 6px;
   background: #fff;
   display: block;
 }
