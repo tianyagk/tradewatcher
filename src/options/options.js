@@ -367,8 +367,19 @@ async function updateCard() {
         h('div', { class: 'tw-hint', style: { marginTop: '5px', whiteSpace: 'pre-wrap' }, text: l.error ?? '未知错误' }),
       );
       if (l.errorKind === 'notfound') {
-        status.append(h('div', { class: 'tw-hint', style: { marginTop: '6px' } },
-          '仓库还没有公开内容。请先在 GitHub 创建该仓库并推送代码，或把上面的仓库地址改成你自己的 fork。'));
+        const repo = String(state.prefs.updateRepo ?? '').trim();
+        const repoName = repo.includes('/') ? repo.split('/').pop() : repo;
+        const createUrl = `https://github.com/new${repoName ? `?name=${encodeURIComponent(repoName)}` : ''}`;
+        status.append(
+          h('div', { class: 'tw-hint', style: { marginTop: '6px' } },
+            '仓库还没有公开内容。请先在 GitHub 创建该仓库并推送代码，或把上面的仓库地址改成你自己的 fork。'),
+          // 匿名 API 对「还没建」和「建了但私有」都返回 404，两种情况的下一步都是
+          // 「先有一个匿名可访问的仓库」，所以这里直接给出创建入口。
+          h('div', { class: 'tw-flex tw-gap6', style: { marginTop: '7px', alignItems: 'center', flexWrap: 'wrap' } },
+            h('button', { class: 'tw-btn sm', onclick: () => window.open(createUrl, '_blank', 'noopener') }, '去 GitHub 创建仓库'),
+            h('span', { class: 'tw-hint', text: '已存在但是私有仓库？匿名接口同样返回 404，需要改成 Public。' }),
+          ),
+        );
       }
       return;
     }
