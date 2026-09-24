@@ -119,6 +119,13 @@ export const CAL_CATEGORY_LABEL = {
   other: '其他',
 };
 
+/**
+ * 版本更新的**唯一来源**：本项目自己的 GitHub 仓库，固定不可配置。
+ * 改这里等于改更新源，别让它变成用户可见的可选项 —— 否则一旦有人把它指向
+ * 名字相近的另一个项目，「就地覆盖」会把整个扩展覆盖成那个项目的内容。
+ */
+export const UPDATE_REPO = 'tianyagk/tradewatcher';
+
 /** 默认偏好 */
 export const DEFAULT_PREFS = {
   theme: 'auto',          // auto | light | dark
@@ -137,8 +144,7 @@ export const DEFAULT_PREFS = {
   panelTab: 'overview',
   cloudMapUrl: 'https://52etf.site/',
   rescue: { enabled: true, universe: [] },
-  // 更新检查（关于页）
-  updateRepo: 'tianyagk/tradewatcher',   // <owner>/<repo>，可改成自己的仓库
+  // 更新检查（关于页）—— 更新源固定为 UPDATE_REPO，不入偏好、不可改
   autoUpdateCheck: true,                 // 每天自动检查一次
   includePrerelease: false,              // 是否把 pre-release 视为新版本
 };

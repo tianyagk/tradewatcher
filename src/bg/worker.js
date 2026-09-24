@@ -9,7 +9,7 @@ import * as cal from './calendar.js';
 import * as store from './store.js';
 import * as updater from './updater.js';
 import { marketStatus, pctClass } from '../shared/format.js';
-import { STRIP_ALL_SECIDS, CORE_INDICES, rescueUniverse } from '../shared/model.js';
+import { STRIP_ALL_SECIDS, CORE_INDICES, UPDATE_REPO, rescueUniverse } from '../shared/model.js';
 
 /* ─────────────────────────── 消息路由 ────────────────────────────────── */
 
@@ -374,7 +374,8 @@ const UPDATE_MIN_INTERVAL = 6 * 3600 * 1000;
 
 async function checkUpdate({ force = false } = {}) {
   const prefs = await store.getPrefs();
-  const repo = prefs.updateRepo || undefined;
+  // 更新源固定为本项目仓库，不从偏好读（避免被改到别的项目上）
+  const repo = UPDATE_REPO;
   if (!force) {
     const prev = await updater.getUpdateState();
     if (prev && prev.repo === repo && Date.now() - (prev.checkedAt ?? 0) < UPDATE_MIN_INTERVAL) return prev;
@@ -387,7 +388,7 @@ async function autoCheckUpdate() {
   const prefs = await store.getPrefs();
   if (prefs.autoUpdateCheck === false) return null;
   const before = await updater.getUpdateState();
-  const state = await updater.refreshUpdateState({ repo: prefs.updateRepo, includePrerelease: !!prefs.includePrerelease });
+  const state = await updater.refreshUpdateState({ repo: UPDATE_REPO, includePrerelease: !!prefs.includePrerelease });
   const isNewDiscovery = state.ok && state.hasUpdate && state.version && before?.version !== state.version;
   if (isNewDiscovery) {
     await notify(

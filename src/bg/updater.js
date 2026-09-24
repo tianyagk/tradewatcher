@@ -17,9 +17,10 @@
  *   由浏览器自行完成更新，见 checkStoreUpdate()。
  */
 import { get, set } from './storage.js';
-import { KEYS, DEFAULT_PREFS } from '../shared/model.js';
+import { KEYS, UPDATE_REPO } from '../shared/model.js';
 
-export const DEFAULT_REPO = DEFAULT_PREFS.updateRepo;
+/** 默认（也是唯一）更新源：本项目仓库 */
+export const DEFAULT_REPO = UPDATE_REPO;
 
 /* ───────────────────────────── 版本号 ─────────────────────────────────── */
 

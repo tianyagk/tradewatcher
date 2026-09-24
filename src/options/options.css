@@ -262,3 +262,17 @@ body {
   width: 100%;
   min-width: 220px;
 }
+
+/* 只读固定值（如「更新仓库」）—— 用等宽字体 + 虚线下划线区别于整页均价的正文 */
+.op-link {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  color: var(--tw-accent);
+  text-decoration: none;
+  border-bottom: 1px dashed currentColor;
+  padding-bottom: 1px;
+  white-space: nowrap;
+}
+.op-link:hover {
+  border-bottom-style: solid;
+}

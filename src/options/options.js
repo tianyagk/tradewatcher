@@ -2,7 +2,7 @@
 import { h, mount, qs, toast, applyPrefs, watchSystemTheme, promptModal, confirmModal } from '../ui/dom.js';
 import * as api from '../ui/api.js';
 import * as updater from '../bg/updater.js';
-import { ALERT_FIELD_LABEL, CORE_INDICES, STRIP_ROWS } from '../shared/model.js';
+import { ALERT_FIELD_LABEL, CORE_INDICES, STRIP_ROWS, UPDATE_REPO } from '../shared/model.js';
 import { fmtDateTime, fmtPct, pctClass } from '../shared/format.js';
 
 const SECTIONS = [
@@ -328,15 +328,14 @@ async function updateCard() {
   const logBox = h('div', { class: 'op-pre', style: { display: 'none' } });
   let latest = null;
 
-  /* 仓库地址（可改） */
-  const repoInput = h('input', { class: 'tw-input', type: 'text', placeholder: 'owner/repo', value: state.prefs.updateRepo ?? '' });
-  repoInput.onchange = async () => {
-    const raw = repoInput.value.trim();
-    await patchQuiet({ updateRepo: raw });
-    repoInput.value = state.prefs.updateRepo ?? '';
-    latest = null;
-    paint();
-  };
+  /* 更新源：固定为本项目仓库，只读展示 */
+  const repoLink = h('a', {
+    class: 'op-link',
+    href: `https://github.com/${UPDATE_REPO}`,
+    target: '_blank',
+    rel: 'noreferrer',
+    title: '在 GitHub 打开本项目仓库',
+  }, UPDATE_REPO);
 
   const autoCtl = toggleCtl(state.prefs.autoUpdateCheck !== false, (v) => patchQuiet({ autoUpdateCheck: v }));
   const preCtl = toggleCtl(!!state.prefs.includePrerelease, (v) => patchQuiet({ includePrerelease: v }));
@@ -367,17 +366,15 @@ async function updateCard() {
         h('div', { class: 'tw-hint', style: { marginTop: '5px', whiteSpace: 'pre-wrap' }, text: l.error ?? '未知错误' }),
       );
       if (l.errorKind === 'notfound') {
-        const repo = String(state.prefs.updateRepo ?? '').trim();
-        const repoName = repo.includes('/') ? repo.split('/').pop() : repo;
+        const [owner, repoName] = UPDATE_REPO.split('/');
         const createUrl = `https://github.com/new${repoName ? `?name=${encodeURIComponent(repoName)}` : ''}`;
         status.append(
           h('div', { class: 'tw-hint', style: { marginTop: '6px' } },
-            '仓库还没有公开内容。请先在 GitHub 创建该仓库并推送代码，或把上面的仓库地址改成你自己的 fork。'),
-          // 匿名 API 对「还没建」和「建了但私有」都返回 404，两种情况的下一步都是
-          // 「先有一个匿名可访问的仓库」，所以这里直接给出创建入口。
+            `更新源固定为 ${UPDATE_REPO}，但该仓库当前无法匿名访问 —— 要么还没创建，要么是私有仓库。`),
+          // 匿名 API 对「还没建」和「建了但私有」都返回 404，客户端分不出来，所以两种可能都要说。
           h('div', { class: 'tw-flex tw-gap6', style: { marginTop: '7px', alignItems: 'center', flexWrap: 'wrap' } },
             h('button', { class: 'tw-btn sm', onclick: () => window.open(createUrl, '_blank', 'noopener') }, '去 GitHub 创建仓库'),
-            h('span', { class: 'tw-hint', text: '已存在但是私有仓库？匿名接口同样返回 404，需要改成 Public。' }),
+            h('span', { class: 'tw-hint', text: `需在 ${owner} 账号下建一个名为 ${repoName} 的 Public 仓库并推送代码。` }),
           ),
         );
       }
@@ -515,8 +512,8 @@ async function updateCard() {
       h('div', { class: 'ctl' }, btnCheck),
     ),
     h('div', { class: 'op-row' },
-      h('div', { class: 'lbl' }, h('b', { text: '更新仓库' }), h('span', { text: 'GitHub owner/repo，可改成本人 fork' })),
-      h('div', { class: 'ctl' }, repoInput),
+      h('div', { class: 'lbl' }, h('b', { text: '更新仓库' }), h('span', { text: '固定来源 · 本项目 GitHub 仓库' })),
+      h('div', { class: 'ctl' }, repoLink),
     ),
     h('div', { class: 'op-row' },
       h('div', { class: 'lbl' }, h('b', { text: '自动检查' }), h('span', { text: '每天检查一次，发现新版本时发系统通知' })),
