@@ -467,20 +467,70 @@ async function rawQuotes(list) {
     if (list.every((s) => rows.has(s))) break;
   }
   // 东财全挂或被限流时，用腾讯批量行情补齐（独立数据源，A股/ETF/指数/港股/美股）
-  const missing = list.filter((s) => !rows.has(s));
+  let missing = list.filter((s) => !rows.has(s));
   if (missing.length > 0) {
+    const used = ['eastmoney'];
     try {
       const fb = await quotesFromTencent(missing);
       for (const [secid, row] of fb) if (!rows.has(secid)) rows.set(secid, row);
+      if (fb.size > 0) used.push('tencent');
     } catch {
       /* 保留原有结果 */
     }
-    noteSource('eastmoney+tencent');
+    // 腾讯只认 sh/sz/hk/us —— 欧洲指数与商品期货它没有，再补一层新浪
+    missing = list.filter((s) => !rows.has(s));
+    if (missing.length > 0) {
+      try {
+        const sg = await quotesFromSinaGlobal(missing);
+        for (const [secid, row] of sg) if (!rows.has(secid)) rows.set(secid, row);
+        if (sg.size > 0) used.push('sina');
+      } catch {
+        /* 保留原有结果 */
+      }
+    }
+    noteSource(used.join('+'));
   } else if (rows.size > 0) {
     noteSource('eastmoney');
   }
   return rows;
 }
+
+/* ───────────────── 全球指数 / 大宗商品：腾讯 + 新浪 双源兜底 ────────────── */
+
+/**
+ * 东财 secid → 免费源符号。
+ *
+ * 为什么需要这张表：东财 push2 的 `/api/**` 在部分网络被**按路径拦截**（实测 TCP 直接 RST，
+ * 三个 push2 主机全都如此），而腾讯批量行情（qt.gtimg.cn）只认 sh/sz/hk/us 前缀，
+ * 覆盖不到欧洲指数与商品期货 —— 于是「欧美市场」「大宗商品」两组长期整片显示 `—`。
+ *
+ * 下面两家都实测可用、无需 key：
+ *   q: 腾讯 qt.gtimg.cn   s: 新浪 hq.sinajs.cn（需 Referer: finance.sina.com.cn）
+ *
+ * 找不到免费源的标的**不要**往这里塞猜测值：宁可在界面上显示 `—`，也不要显示错的价格。
+ * 例如「法国CAC40」「韩国KOSPI200」「澳洲标普200」目前无可用免费源（见 SKILL 记录）。
+ */
+const GLOBAL_SYMBOL = {
+  // 欧美市场
+  '100.SPX': { q: 'usINX' },              // 标普500
+  '100.NDX': { q: 'usNDX' },              // 纳斯达克100
+  '100.DJIA': { q: 'usDJI' },             // 道琼斯
+  '100.FTSE': { s: 'int_ftse' },          // 英国富时100
+  '100.GDAXI': { s: 'int_dax30' },        // 德国DAX30
+  // 新浪口径下欧盟50指数即欧洲斯托克50，名称会不一致，展示时以本地名称为准
+  '100.SX5E': { s: 'int_djstoxx50' },     // 欧洲斯托克50
+  // 亚太
+  '100.N225': { s: 'int_nikkei' },        // 日经225
+  // 大宗商品（外盘 hf_ / 国内期货 nf_）
+  '122.XAU': { s: 'hf_XAU' },             // 伦敦金现
+  '101.SI00Y': { s: 'hf_SI' },            // COMEX白银
+  '101.HG00Y': { s: 'hf_HG' },            // COMEX铜
+  '112.B00Y': { s: 'hf_OIL' },            // 布伦特原油
+  '113.rbm': { s: 'nf_RB0' },             // 螺纹钢主连
+  '114.jmm': { s: 'nf_JM0' },             // 焦煤主连
+  '114.mm': { s: 'nf_M0' },               // 豆粕主连
+  '114.lhm': { s: 'nf_LH0' },             // 生猪主连
+};
 
 /* ───────────────── 腾讯批量行情兜底（独立第二数据源） ─────────────────── */
 
@@ -809,6 +859,9 @@ function sinaSymbol(secid) {
 
 /** secid → 腾讯代码（sh/sz/hk/us + 部分全球指数） */
 function tencentSymbol(secid) {
+  // 显式映射优先：东财的全球指数 secid（100.SPX 之类）与腾讯符号毫无规律，只能逐个列。
+  const mapped = GLOBAL_SYMBOL[secid];
+  if (mapped) return mapped.q ?? null;   // 只配了 s: 的标的走新浪，这里返回 null 让调用方跳过
   const dot = secid.indexOf('.');
   if (dot <= 0) return null;
   const mkt = secid.slice(0, dot);
@@ -823,6 +876,112 @@ function tencentSymbol(secid) {
     return map[code.toUpperCase()] ?? null;
   }
   return null;
+}
+
+/**
+ * 新浪全球指数 / 外盘期货 / 国内期货兜底。
+ *
+ * 三种格式的字段位置**各不相同**，且都不是自描述的，所以逐一写清并注明依据：
+ *   int_*  国际指数：`名称, 现价, 涨跌额, 涨跌幅%`
+ *   hf_*   外盘期货：`现价, ?, 买价, 卖价, 最高, 最低, 时间, 昨收, 开盘, …, 日期, 名称`
+ *                    涨跌幅没有直接给，用 现价/昨收 自算（已用腾讯同代码的涨跌幅字段交叉验证一致）
+ *   nf_*   国内期货：`名称, 时间, 开盘, 最高, 最低, …, [8] 最新价, …, [10] 昨结算, …`
+ *                    **期货涨跌幅按「最新价 / 昨结算 − 1」算，不是昨收盘** —— 这是期货与股票的
+ *                    关键差别，用昨收盘会算出错误（甚至恒为 0）的涨跌幅。
+ */
+async function quotesFromSinaGlobal(list) {
+  const out = new Map();
+  const pairs = [];
+  for (const secid of list) {
+    const sym = GLOBAL_SYMBOL[secid]?.s;
+    if (sym) pairs.push([secid, sym]);
+  }
+  if (pairs.length === 0) return out;
+
+  let text;
+  try {
+    text = await fetchText(`https://hq.sinajs.cn/list=${pairs.map((p) => p[1]).join(',')}`, {
+      referer: SINA_REFERER,
+      encoding: 'gbk',        // hq.sinajs.cn 返回 GBK
+      timeoutMs: 9000,
+    });
+  } catch {
+    return out;
+  }
+
+  const bySym = new Map(pairs.map(([secid, sym]) => [sym, secid]));
+  for (const line of text.split('\n')) {
+    const m = /hq_str_([A-Za-z0-9_]+)="([^"]*)"/.exec(line);
+    if (m === null || m[2] === '') continue;   // 停牌/无数据的代码返回空串
+    const secid = bySym.get(m[1]);
+    if (secid === undefined) continue;
+    const row = sinaGlobalRow(secid, m[1], m[2].split(','));
+    if (row !== null) out.set(secid, row);
+  }
+  return out;
+}
+
+function sinaGlobalRow(secid, sym, f) {
+  const code = secid.split('.')[1];
+  const base = { secid, code, open: null, high: null, low: null, vol: null, amount: null, time: null };
+
+  if (sym.startsWith('int_')) {
+    const price = num(f[1]);
+    if (price === null) return null;
+    return { ...base, name: f[0] || secid, price, prev: null, chg: num(f[2]), pct: num(f[3]), source: 'sina-int' };
+  }
+
+  if (sym.startsWith('hf_')) {
+    const price = num(f[0]);
+    const prev = num(f[7]);
+    if (price === null) return null;
+    return {
+      ...base,
+      name: f[13] || secid,
+      price,
+      prev,
+      open: num(f[8]),
+      high: num(f[4]),
+      low: num(f[5]),
+      chg: prev === null ? null : price - prev,
+      pct: prev ? ((price - prev) / prev) * 100 : null,
+      time: sinaDateTime(f[12], f[6]),
+      source: 'sina-hf',
+    };
+  }
+
+  if (sym.startsWith('nf_')) {
+    const price = num(f[8]);
+    const prev = num(f[10]);   // 昨结算
+    if (price === null) return null;
+    return {
+      ...base,
+      name: f[0] || secid,
+      price,
+      prev,
+      open: num(f[2]),
+      high: num(f[3]),
+      low: num(f[4]),
+      chg: prev === null ? null : price - prev,
+      pct: prev ? ((price - prev) / prev) * 100 : null,
+      vol: num(f[14]),
+      time: sinaDateTime(f[17], f[1]),
+      source: 'sina-nf',
+    };
+  }
+
+  return null;
+}
+
+/** `'2026-09-25'` + `'10:26:30'` 或 `'102630'` → 毫秒时间戳（拿不到就 null） */
+function sinaDateTime(date, time) {
+  const d = String(date ?? '').trim();
+  const t = String(time ?? '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+  const hhmmss = /^\d{6}$/.test(t) ? `${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}` : t;
+  if (!/^\d{2}:\d{2}:\d{2}$/.test(hhmmss)) return null;
+  const ms = Date.parse(`${d}T${hhmmss}`);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 async function fetchSina5Min(sym, datalen) {

@@ -7,7 +7,7 @@ import * as api from '../ui/api.js';
 import { sparkline, distributionChart, marginChart, breadthChart } from '../ui/charts.js';
 import {
   fmtAmt, fmtAmtLike, fmtChg, fmtDate, fmtInt, fmtPct, fmtPrice, marketLabel,
-  pctClass, secidSplit,
+  marketStatus, pctClass, secidSplit,
 } from '../shared/format.js';
 import { ALERT_FIELD_LABEL, BOARD_SCOPES, CAL_CATEGORY_LABEL } from '../shared/model.js';
 
@@ -50,9 +50,13 @@ function watchRow(ctx, item) {
     ),
   );
 
-  const sparkBox = h('div', { style: { height: '24px', display: 'flex', alignItems: 'center', justifyContent: 'center' } });
+  const sparkBox = h('div', { class: 'pn-spark' });
   const tr = ctx.state.trends?.get(item.secid);
-  if (ctx.state.prefs.sparkline && tr?.points?.length > 1) sparkBox.append(sparkline(tr.points, { redUp: ctx.redUp, width: 70, height: 22 }));
+  if (ctx.state.prefs.sparkline && tr?.points?.length > 1) {
+    sparkBox.append(sparkline(tr.points, { redUp: ctx.redUp, width: 70, height: 22 }));
+  } else {
+    sparkBox.append(h('span', { class: 'tw-hint', text: '—' }));
+  }
 
   const px = ctx.registerQuote(item.secid, 'price', (v) => fmtPrice(v));
   const pctEl = ctx.registerQuote(item.secid, 'pct', (v) => fmtPct(v), { colorize: true, strong: true });
@@ -512,20 +516,56 @@ export async function renderPos(ctx) {
     return;
   }
   const basis = st.prefs.costBasis;
-  box.append(
+  const secids = rows.map((p) => p.secid);
+  const totalMv = gv?.totalMv ?? 0;
+
+  // 缩略分时与自选列表共用同一份缓存（90s TTL）。休市时行情源返回的是最近一个
+  // 交易日，这里不做日期改写，只在表头下方把「数据是哪天的」标出来，避免误读。
+  await loadTrends(ctx, secids);
+  const mkt = marketStatus();
+  const trendDate = mkt.open ? null : latestTrendDate(ctx, secids);
+
+  const list = h('div', { class: 'pn-list' });
+  list.append(
     h('div', { class: 'pn-list-row head w-pos' },
-      h('span', {}, '名称 / 数量'), h('span', { class: 'tw-right' }, '成本'), h('span', { class: 'tw-right' }, '现价'),
-      h('span', { class: 'tw-right' }, '市值'), h('span', { class: 'tw-right' }, '浮动盈亏'), h('span', { class: 'tw-right' }, '当日盈亏'),
+      h('span', {}, '名称 / 数量'), h('span', { class: 'tw-center' }, '分时'), h('span', { class: 'tw-right' }, '成本'),
+      h('span', { class: 'tw-right' }, '现价'), h('span', { class: 'tw-right' }, '市值'), h('span', { class: 'tw-right' }, '占比'),
+      h('span', { class: 'tw-right' }, '浮动盈亏'), h('span', { class: 'tw-right' }, '当日盈亏'),
     ),
   );
-  for (const p of rows) box.append(posRow(ctx, p, basis));
+  if (trendDate !== null) {
+    list.append(h('div', { class: 'pn-note', text: `${mkt.label} · 分时缩略图为最近交易日 ${trendDate} 的走势` }));
+  }
+  for (const p of rows) list.append(posRow(ctx, p, basis, totalMv));
+  box.append(list);
   ctx.patchQuotes();
 }
 
-function posRow(ctx, p, basis) {
+/** 这批标的中最新的那个分时数据日期（YYYY-MM-DD），用于休市时提示数据时点 */
+function latestTrendDate(ctx, secids) {
+  let best = null;
+  for (const s of secids) {
+    const d = ctx.state.trends?.get(s)?.points?.[0]?.label?.slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(d ?? '') && (best === null || d > best)) best = d;
+  }
+  return best;
+}
+
+function posRow(ctx, p, basis, totalMv = 0) {
   const cost = basis === 'diluted' ? (p.dilutedCost ?? p.avgCost) : p.avgCost;
   const pnl = basis === 'diluted' ? (p.dilutedPnl ?? p.floatPnl) : p.floatPnl;
   const pnlPct = basis === 'diluted' ? p.dilutedPnlPct : p.floatPnlPct;
+  // 持仓占比 = 本标的市值 / 本账户持仓总市值（不含现金，与「总市值」口径一致）
+  const wt = !p.empty && p.mv > 0 && totalMv > 0 ? (p.mv / totalMv) * 100 : null;
+
+  const sparkBox = h('div', { class: 'pn-spark' });
+  const tr = ctx.state.trends?.get(p.secid);
+  if (ctx.state.prefs.sparkline && tr?.points?.length > 1) {
+    sparkBox.append(sparkline(tr.points, { redUp: ctx.redUp, width: 62, height: 20 }));
+  } else {
+    sparkBox.append(h('span', { class: 'tw-hint', text: '—' }));
+  }
+
   const row = h(
     'div',
     { class: 'pn-list-row w-pos' },
@@ -536,9 +576,11 @@ function posRow(ctx, p, basis) {
       ),
       h('div', { class: 'tw-hint tw-num', text: p.empty ? '未录入流水' : `${p.qty} 股` }),
     ),
+    sparkBox,
     h('div', { class: 'tw-right tw-num' }, cost ? fmtPrice(cost, 3) : '—'),
     h('div', { class: 'tw-right' }, ctx.registerQuote(p.secid, 'price', (v) => fmtPrice(v))),
     h('div', { class: 'tw-right tw-num' }, p.empty ? '—' : fmtAmt(p.mv)),
+    h('div', { class: 'tw-right tw-num' }, wt === null ? '—' : `${wt.toFixed(2)}%`),
     h('div', { class: 'tw-right' },
       h('div', { class: `tw-num ${pctClass(pnl, ctx.redUp)}` }, p.empty ? '—' : fmtAmt(pnl)),
       h('div', { class: `tw-hint tw-num ${pctClass(pnlPct, ctx.redUp)}` }, pnlPct === null || pnlPct === undefined ? '' : fmtPct(pnlPct)),

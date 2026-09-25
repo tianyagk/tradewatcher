@@ -297,11 +297,50 @@ body.pn-body {
 .w-watch {
   grid-template-columns: minmax(86px, 1.6fr) 76px 68px 60px 62px;
 }
+/* 持仓：名称 / 分时 / 成本 / 现价 / 市值 / 占比 / 浮动盈亏 / 当日盈亏 */
 .w-pos {
-  grid-template-columns: minmax(84px, 1.5fr) 62px 62px 62px 66px 58px;
+  grid-template-columns: minmax(84px, 1.5fr) 62px 56px 58px 58px 46px 66px 58px;
+}
+/* 侧边栏常态只有 300~420px，8 列排不下 —— 窄屏折成 5 列两行（区域重排）：
+     名称 分时 现价 市值 占比
+     名称 成本 浮动 当日（跨两列）
+   表头与数据行子元素顺序一致，故统一用 nth-child 指定区域。 */
+@media (max-width: 600px) {
+  .w-pos {
+    grid-template-columns: minmax(68px, 1fr) 56px 54px 54px 46px;
+    grid-template-areas:
+      "name spark price mv  wt"
+      "name cost  float day day";
+    row-gap: 1px;
+  }
+  .w-pos > *:nth-child(1) { grid-area: name; }
+  .w-pos > *:nth-child(2) { grid-area: spark; }
+  .w-pos > *:nth-child(3) { grid-area: cost; }
+  .w-pos > *:nth-child(4) { grid-area: price; }
+  .w-pos > *:nth-child(5) { grid-area: mv; }
+  .w-pos > *:nth-child(6) { grid-area: wt; }
+  .w-pos > *:nth-child(7) { grid-area: float; }
+  .w-pos > *:nth-child(8) { grid-area: day; }
 }
 .w-rank {
   grid-template-columns: 22px minmax(80px, 1.6fr) 62px 76px 70px;
+}
+
+/* 缩略分时格：无论有没有数据都占住同样高度，避免行高跳动 */
+.pn-spark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  min-width: 0;
+}
+
+/* 表头下的补充说明（如休市时分时数据所属的交易日） */
+.pn-note {
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--tw-ink-3);
+  border-bottom: 1px solid var(--tw-border);
 }
 
 .pn-code {

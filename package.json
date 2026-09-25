@@ -1,6 +1,6 @@
 {
   "name": "tradewatcher",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "private": true,
   "type": "module",
   "description": "综合盯盘 Edge/Chrome 扩展（MV3）。此文件仅供开发期工具链使用，扩展运行时不读取它。",
