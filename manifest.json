@@ -10,12 +10,15 @@
     "alarms",
     "notifications",
     "sidePanel",
-    "contextMenus"
+    "contextMenus",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
   ],
   "host_permissions": [
     "https://*.eastmoney.com/*",
     "https://*.sina.com.cn/*",
     "https://*.sina.cn/*",
+    "https://hq.sinajs.cn/*",
     "https://*.qq.com/*",
     "https://*.gtimg.cn/*",
     "https://52etf.site/*",
@@ -24,6 +27,11 @@
     "https://codeload.github.com/*",
     "https://raw.githubusercontent.com/*"
   ],
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "sina-referer", "enabled": true, "path": "src/bg/rules.json" }
+    ]
+  },
   "background": {
     "service_worker": "src/bg/worker.js",
     "type": "module"
